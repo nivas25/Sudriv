@@ -1,36 +1,79 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/.pnp
+# ========================
+# Dependencies
+# ========================
+node_modules/
+.pnp
 .pnp.js
 
-# testing
-/coverage
+# ========================
+# Build outputs
+# ========================
+.next/
+out/
+build/
+dist/
+.turbo/
 
-# next.js
-/.next/
-/out/
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+*.whl
+.venv/
+venv/
+env/
 
-# production
-/build
+# ========================
+# Environment variables
+# ========================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# misc
+# ========================
+# IDE / Editor
+# ========================
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ========================
+# OS files
+# ========================
 .DS_Store
-*.pem
+Thumbs.db
+desktop.ini
 
-# debug
+# ========================
+# Debug logs
+# ========================
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
-# local env files
-.env*.local
-.env
+# ========================
+# Testing / Coverage
+# ========================
+coverage/
+.nyc_output/
+.pytest_cache/
+htmlcov/
 
-# vercel
-.vercel
-
-# typescript
+# ========================
+# Misc
+# ========================
+*.pem
 *.tsbuildinfo
 next-env.d.ts
+.vercel
+.supabase/

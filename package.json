@@ -1,0 +1,23 @@
+{
+  "name": "sudriv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-time AI co-pilot for news producers — voice-controlled timeline management",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "clean": "turbo clean",
+    "dev:web": "turbo dev --filter=@sudriv/web",
+    "dev:agent": "cd apps/agent && uv run python main.py dev",
+    "build:web": "turbo build --filter=@sudriv/web",
+    "db:generate-types": "cd packages/database && npx supabase gen types typescript --project-id $SUPABASE_PROJECT_ID > src/types.ts"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

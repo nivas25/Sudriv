@@ -1,0 +1,51 @@
+[project]
+name = "sudriv-agent"
+version = "0.1.0"
+description = "Sudriv Voice Agent — LiveKit-based AI co-pilot for news producers"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    # LiveKit Agents SDK
+    "livekit-agents>=1.0.0",
+    "livekit-plugins-silero>=1.0.0",
+
+    # LLM — Groq
+    "livekit-plugins-openai>=1.0.0",  # Groq uses OpenAI-compatible API
+
+    # Database
+    "supabase>=2.0.0",
+
+    # Redis
+    "redis[hiredis]>=5.0.0",
+
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent"]
+

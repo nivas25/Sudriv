@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Sudriv Design System — CSS Custom Properties
+ * Based on shadcn/ui theming conventions
+ * See knowledge-base/07-frontend-architecture.md for design rationale
+ */
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+
+    --primary: 356 97% 42%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --success: 142 76% 36%;
+    --success-foreground: 0 0% 100%;
+
+    --on-air: 0 100% 50%;
+    --on-air-foreground: 0 0% 100%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 222 47% 31%;
+
+    --radius: 0.5rem;
+  }
+
+  /*
+   * Dark mode — premium broadcast control room theme
+   */
+  .dark {
+    --background: 240 10% 4%; /* #0A0A0C */
+    --foreground: 0 0% 93%; /* #EDEDED */
+
+    --card: 240 5% 8%; /* #121214 */
+    --card-foreground: 0 0% 93%;
+
+    --popover: 240 5% 8%;
+    --popover-foreground: 0 0% 93%;
+
+    --primary: 356 97% 42%; /* Sudriv Red */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 240 5% 12%;
+    --secondary-foreground: 0 0% 93%;
+
+    --muted: 240 5% 12%;
+    --muted-foreground: 240 5% 65%; /* #A1A1AA */
+
+    --accent: 240 5% 15%;
+    --accent-foreground: 0 0% 93%;
+
+    --destructive: 0 63% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --success: 142 70% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --on-air: 0 100% 55%;
+    --on-air-foreground: 0 0% 100%;
+
+    --border: 240 5% 15%; /* #27272A */
+    --input: 240 5% 15%;
+    --ring: 356 97% 42%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/*
+ * Sudriv-specific utility classes
+ */
+@layer utilities {
+  /* Teleprompter text styling */
+  .teleprompter-text {
+    @apply text-2xl leading-relaxed font-medium tracking-wide;
+  }
+
+  /* On-air pulsing indicator */
+  .on-air-dot {
+    @apply w-2.5 h-2.5 rounded-full bg-on-air animate-pulse-on-air;
+  }
+
+  /* Panel layout helpers */
+  .panel {
+    @apply bg-card rounded-lg border border-border shadow-sm;
+  }
+
+  .panel-header {
+    @apply px-4 py-3 border-b border-border font-semibold text-sm;
+  }
+
+  .panel-body {
+    @apply p-4;
+  }
+}
+
+/* Ultra-Thin Hairline Red Scrollbar */
+::-webkit-scrollbar {
+  width: 1px !important;
+  height: 1px !important;
+}
+::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(356 97% 42%) !important;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(356 97% 42%) !important;
+}
+::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+::-webkit-scrollbar-corner {
+  background: transparent !important;
+}
+
+/* Firefox fallback to completely hide default scrollbar since we can't style it to 1px */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: none;
+  }
+}
