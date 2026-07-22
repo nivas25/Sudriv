@@ -44,98 +44,21 @@ export function TranscriptPanel({ sessionId }: { sessionId: string }) {
   return <TranscriptPanelConnected sessionId={sessionId} />;
 }
 
-/**
- * Live agent status badge.
- *
- * Note: LiveKit's useVoiceAssistant() returns "connecting" both when the
- * room is connecting AND when the agent participant is missing. We split
- * those cases so "CONNECTING" is only for room connect, and "AGENT RECONNECTING"
- * is shown when the room is up but the worker left mid-session.
- */
-function AgentLiveStatus({
-  state,
-  roomConnected,
-}: {
-  state: string | undefined;
-  roomConnected: boolean;
-}) {
-  const normalized = (state || "idle").toLowerCase();
-
-  let label = "AGENT IDLE";
-  let tone: "active" | "warn" | "idle" = "idle";
-
-  if (normalized === "listening") {
-    label = "AGENT LISTENING";
-    tone = "active";
-  } else if (normalized === "thinking") {
-    label = "THINKING";
-    tone = "active";
-  } else if (normalized === "speaking") {
-    label = "SPEAKING";
-    tone = "active";
-  } else if (
-    normalized === "connecting" ||
-    normalized === "initializing"
-  ) {
-    if (roomConnected) {
-      // Room is fine — worker is missing / joining
-      label = "AGENT RECONNECTING";
-      tone = "warn";
-    } else {
-      label = "CONNECTING";
-      tone = "warn";
-    }
-  } else if (normalized === "disconnected") {
-    label = "DISCONNECTED";
-    tone = "warn";
-  }
-
-  const isActive = tone === "active";
-  const isWarn = tone === "warn";
-
-  return (
-    <div
-      className={`inline-flex items-center gap-2 pl-2.5 pr-3 py-1 rounded-full border ${
-        isActive
-          ? "bg-blue-50 border-blue-200 shadow-[0_0_12px_rgba(37,99,235,0.25)]"
-          : isWarn
-            ? "bg-blue-50 border-blue-300 shadow-[0_0_12px_rgba(37,99,235,0.2)]"
-            : "bg-blue-50/60 border-blue-100"
-      }`}
-      aria-live="polite"
-      title={`Agent state: ${label}`}
-    >
-      <span className="relative flex h-2.5 w-2.5">
-        {(isActive || isWarn) && (
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
-        )}
-        <span
-          className={`relative inline-flex h-2.5 w-2.5 rounded-full ${
-            isActive || isWarn ? "bg-blue-600" : "bg-blue-300"
-          }`}
-        />
-      </span>
-      <span
-        className={`text-[10px] font-bold uppercase tracking-[0.14em] ${
-          isActive || isWarn ? "text-blue-700 animate-pulse" : "text-blue-500"
-        }`}
-      >
-        {label}
-      </span>
-    </div>
-  );
-}
-
 function TranscriptPanelDisconnected() {
   return (
     <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden">
       <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100">
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
           <MessageSquare className="w-5 h-5 text-gray-400" />
           <h2 className="font-heading font-bold text-lg text-gray-900 tracking-tight">
             AI Copilot Feed
           </h2>
-          <AgentLiveStatus state="connecting" roomConnected={false} />
+        </div>
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-sm bg-amber-500 shadow-sm">
+          <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+          <span className="text-[10px] font-bold text-white uppercase tracking-widest">
+            Connecting…
+          </span>
         </div>
       </div>
       <div className="flex-1 flex flex-col items-center justify-center gap-4">
@@ -325,7 +248,7 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
     }
   }, [messages]);
 
-  const micStatusColor = isConnected
+  const statusColor = isConnected
     ? holding || isMicrophoneEnabled
       ? "bg-emerald-600"
       : "bg-gray-500"
@@ -333,7 +256,7 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
       ? "bg-amber-500"
       : "bg-gray-400";
 
-  const micStatusText = !isConnected
+  const statusText = !isConnected
     ? connectionState === ConnectionState.Connecting
       ? "Connecting…"
       : "Disconnected"
@@ -341,36 +264,36 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
       ? "Push-to-talk"
       : "Hold mic to talk";
 
-  // Prefer LiveKit voice-assistant state; fall back while room is connecting.
-  // Note: agentState === "connecting" often means "agent missing", not room connect.
-  const liveAgentState = !isConnected
-    ? connectionState === ConnectionState.Connecting
-      ? "connecting"
-      : connectionState === ConnectionState.Disconnected
-        ? "disconnected"
-        : "connecting"
-    : agentState || "connecting";
+  const agentLabel =
+    agentState === "listening"
+      ? "Agent listening"
+      : agentState === "thinking"
+        ? "Agent thinking"
+        : agentState === "speaking"
+          ? "Agent speaking"
+          : "Agent idle";
 
   return (
     <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden select-none">
-      <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 bg-white gap-3">
-        <div className="flex items-center gap-3 flex-wrap min-w-0">
-          <MessageSquare className="w-5 h-5 text-gray-400 shrink-0" />
+      <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 bg-white">
+        <div className="flex items-center gap-3">
+          <MessageSquare className="w-5 h-5 text-gray-400" />
           <h2 className="font-heading font-bold text-lg text-gray-900 tracking-tight">
             AI Copilot Feed
           </h2>
-          <AgentLiveStatus
-            state={liveAgentState}
-            roomConnected={isConnected}
-          />
         </div>
-        <div
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-sm ${micStatusColor} shadow-sm shrink-0`}
-        >
-          <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-          <span className="text-[10px] font-bold text-white uppercase tracking-widest">
-            {micStatusText}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest hidden sm:inline">
+            {agentLabel}
           </span>
+          <div
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-sm ${statusColor} shadow-sm`}
+          >
+            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+            <span className="text-[10px] font-bold text-white uppercase tracking-widest">
+              {statusText}
+            </span>
+          </div>
         </div>
       </div>
 

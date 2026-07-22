@@ -13,31 +13,62 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Optional
 
 from redis.asyncio import Redis
 from supabase import Client, create_client
 
 logger = logging.getLogger("sudriv-agent.session")
 
+# Loop-bound Redis: LiveKit reuses job processes with a new event loop per job.
+# A process-global redis.asyncio client causes:
+#   RuntimeError: got Future attached to a different loop
 _redis_instance: Optional[Redis] = None
+_redis_loop: Optional[asyncio.AbstractEventLoop] = None
 _supabase_instance: Optional[Client] = None
-
-T = TypeVar("T")
-
-# How long a "already greeted / active" flag lives (covers reconnect / restart).
-_GREETING_TTL_SECONDS = 60 * 60 * 6  # 6 hours
-
-# Process-local backup when Redis is slow/unavailable — prevents re-greet on
-# job re-dispatch inside the same worker process.
-_local_active_sessions: set[str] = set()
 
 
 def redis_client() -> Redis:
-    global _redis_instance
-    if _redis_instance is None:
-        _redis_instance = Redis.from_url(os.environ["UPSTASH_REDIS_URL"], decode_responses=True)
+    global _redis_instance, _redis_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError as e:
+        raise RuntimeError(
+            "redis_client() requires a running event loop"
+        ) from e
+
+    if _redis_instance is not None and _redis_loop is loop and not loop.is_closed():
+        return _redis_instance
+
+    if _redis_instance is not None:
+        try:
+            _redis_instance.connection_pool.disconnect(inuse_connections=True)
+        except Exception:
+            pass
+        _redis_instance = None
+        _redis_loop = None
+
+    url = os.environ.get("UPSTASH_REDIS_URL")
+    if not url:
+        raise RuntimeError("UPSTASH_REDIS_URL is required")
+
+    _redis_instance = Redis.from_url(url, decode_responses=True)
+    _redis_loop = loop
     return _redis_instance
+
+
+async def close_redis() -> None:
+    """Close loop-bound Redis client (job shutdown)."""
+    global _redis_instance, _redis_loop
+    client = _redis_instance
+    _redis_instance = None
+    _redis_loop = None
+    if client is None:
+        return
+    try:
+        await client.aclose()
+    except Exception as e:
+        logger.debug("redis aclose: %s", e)
 
 
 def supabase_client() -> Client:
@@ -54,16 +85,6 @@ def supabase_client() -> Client:
             )
         _supabase_instance = create_client(url, key)
     return _supabase_instance
-
-
-async def run_sync(fn: Callable[[], T]) -> T:
-    """
-    Run blocking work off the LiveKit job event loop.
-
-    Sync Supabase HTTP calls on the event loop block pings and trigger
-    "job executor is unresponsive" (high_ping_threshold ≈ 0.5s).
-    """
-    return await asyncio.to_thread(fn)
 
 
 @dataclass
@@ -104,10 +125,11 @@ class SessionManager:
         logger.info(f"Initializing session {session_id} from room {room.name}")
 
         redis = redis_client()
+        supabase = supabase_client()
 
         running_order = None
-
-        # 1. Try to load from Redis (async client — safe on the event loop)
+        
+        # 1. Try to load from Redis
         try:
             ro_json = await redis.get(f"running_order:{session_id}")
             if ro_json:
@@ -115,55 +137,30 @@ class SessionManager:
         except Exception as e:
             logger.warning(f"Failed to load running order from Redis: {e}")
 
-        # 2. If not in Redis, load from Supabase OFF the event loop
+        # 2. If not in Redis, load from Supabase
         if not running_order:
-            logger.info(
-                "Running order not in Redis for %s, loading from Supabase", session_id
-            )
-
-            def _load_ro_from_db() -> dict[str, Any]:
-                supabase = supabase_client()
-                ro_resp = (
-                    supabase.table("running_orders")
-                    .select("*")
-                    .eq("session_id", session_id)
-                    .order("version", desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                if not ro_resp.data:
-                    return {
-                        "session_id": session_id,
-                        "version": 1,
-                        "total_duration_seconds": 0,
-                        "segments": [],
-                    }
+            logger.info(f"Running order not in Redis for {session_id}, loading from Supabase")
+            # Get the running order ID for this session
+            ro_resp = supabase.table("running_orders").select("*").eq("session_id", session_id).order("version", desc=True).limit(1).execute()
+            
+            if ro_resp.data:
                 ro_data = ro_resp.data[0]
-                seg_resp = (
-                    supabase.table("segments")
-                    .select("*")
-                    .eq("running_order_id", ro_data["id"])
-                    .order("position")
-                    .execute()
-                )
-                return {
+                
+                # Fetch segments for this running order
+                seg_resp = supabase.table("segments").select("*").eq("running_order_id", ro_data["id"]).order("position").execute()
+                
+                running_order = {
                     "session_id": session_id,
                     "version": ro_data["version"],
                     "total_duration_seconds": ro_data["total_duration_seconds"],
-                    "segments": seg_resp.data if seg_resp.data else [],
+                    "segments": seg_resp.data if seg_resp.data else []
                 }
-
-            try:
-                running_order = await run_sync(_load_ro_from_db)
-                if running_order.get("segments"):
-                    asyncio.create_task(
-                        redis.set(
-                            f"running_order:{session_id}",
-                            json.dumps(running_order),
-                        )
-                    )
-            except Exception as e:
-                logger.warning("Failed to load running order from Supabase: %s", e)
+                
+                # Cache it in Redis asynchronously (fire and forget)
+                import asyncio
+                asyncio.create_task(redis.set(f"running_order:{session_id}", json.dumps(running_order)))
+            else:
+                # No running order found
                 running_order = {
                     "session_id": session_id,
                     "version": 1,
@@ -171,21 +168,12 @@ class SessionManager:
                     "segments": [],
                 }
 
-        # 3. Load available news items from Supabase (off event loop)
-        news_items: list[dict[str, Any]] = []
+        # 3. Load available news items from Supabase
+        news_items = []
         try:
-
-            def _load_news() -> list[dict[str, Any]]:
-                supabase = supabase_client()
-                news_resp = (
-                    supabase.table("news_items")
-                    .select("*")
-                    .eq("is_used", False)
-                    .execute()
-                )
-                return news_resp.data or []
-
-            news_items = await run_sync(_load_news)
+            news_resp = supabase.table("news_items").select("*").eq("is_used", False).execute()
+            if news_resp.data:
+                news_items = news_resp.data
         except Exception as e:
             logger.warning(f"Failed to load news items from Supabase: {e}")
 
@@ -351,108 +339,8 @@ class SessionManager:
         )
 
     def build_greeting(self) -> str:
-        """Short natural Hindi opener — no segment dumps."""
-        return "नमस्ते, मैं सुद्रिव हूँ। तैयार हूँ, बताइए क्या करना है।"
-
-    async def mark_conversation_active(self) -> None:
-        """
-        Mark this session as already in a conversation.
-
-        Called after greeting and on any real user/agent turn so a job
-        re-dispatch mid-session will not greet again.
-        """
-        sid = self.session_id
-        _local_active_sessions.add(sid)
-        try:
-            redis = redis_client()
-            await redis.set(
-                f"greeting_said:{sid}", "1", ex=_GREETING_TTL_SECONDS
-            )
-            await redis.set(
-                f"session_active:{sid}", "1", ex=_GREETING_TTL_SECONDS
-            )
-        except Exception as e:
-            logger.warning("mark_conversation_active redis failed: %s", e)
-
-    async def should_greet(self) -> bool:
-        """
-        True only on the first join of a fresh session.
-
-        Multi-layer so mid-conversation restarts never re-greet:
-          1. Process-local set
-          2. Redis greeting_said / session_active keys
-          3. Existing chat_context messages in Redis
-          4. Atomic SET NX claim (first greeter wins)
-        On Redis failure: skip greeting if we have any local signal of activity.
-        """
-        sid = self.session_id
-
-        if sid in _local_active_sessions:
-            logger.info("should_greet=False (local memory) session=%s", sid)
-            return False
-
-        try:
-            redis = redis_client()
-            said, active, chat_raw = await redis.mget(
-                f"greeting_said:{sid}",
-                f"session_active:{sid}",
-                f"chat_context:{sid}",
-            )
-            if said or active:
-                _local_active_sessions.add(sid)
-                logger.info("should_greet=False (redis flags) session=%s", sid)
-                return False
-            if chat_raw:
-                try:
-                    msgs = json.loads(chat_raw)
-                    if isinstance(msgs, list) and len(msgs) > 0:
-                        _local_active_sessions.add(sid)
-                        logger.info(
-                            "should_greet=False (chat history %d msgs) session=%s",
-                            len(msgs),
-                            sid,
-                        )
-                        return False
-                except json.JSONDecodeError:
-                    pass
-
-            # First greeter wins (atomic)
-            claimed = await redis.set(
-                f"greeting_said:{sid}", "1", nx=True, ex=_GREETING_TTL_SECONDS
-            )
-            if claimed:
-                _local_active_sessions.add(sid)
-                logger.info("should_greet=True (claimed) session=%s", sid)
-                return True
-
-            _local_active_sessions.add(sid)
-            logger.info("should_greet=False (lost race) session=%s", sid)
-            return False
-        except Exception as e:
-            # Fail CLOSED if we already know this process talked; otherwise
-            # allow one greet so a brand-new session is not silent.
-            logger.warning("should_greet redis error: %s", e)
-            if sid in _local_active_sessions:
-                return False
-            _local_active_sessions.add(sid)
-            return True
-
-    async def claim_greeting(self) -> bool:
-        """Back-compat alias for should_greet()."""
-        return await self.should_greet()
-
-    async def load_chat_context(self) -> list[dict[str, Any]]:
-        """Load previously synced chat messages (if any) for session continuity."""
-        try:
-            redis = redis_client()
-            raw = await redis.get(f"chat_context:{self.session_id}")
-            if not raw:
-                return []
-            data = json.loads(raw)
-            return data if isinstance(data, list) else []
-        except Exception as e:
-            logger.warning("Failed to load chat context: %s", e)
-            return []
+        """Short friendly Hindi opener — no segment dumps."""
+        return "नमस्ते! मैं सुद्रिव हूँ, तैयार हूँ। बताइए, क्या करना है?"
 
     async def update_running_order(self, new_order: dict[str, Any]) -> None:
         """
@@ -461,6 +349,8 @@ class SessionManager:
         Awaits DB write so the frontend poll/Refresh sees new segments immediately
         after the tool returns (not fire-and-forget).
         """
+        import asyncio
+
         self.running_order = new_order
         version = new_order.get("version", 1)
         total_dur = new_order.get("total_duration_seconds", 0)
@@ -518,7 +408,7 @@ class SessionManager:
             return len(segments)
 
         try:
-            n = await run_sync(_update_db)
+            n = await asyncio.to_thread(_update_db)
             logger.info("Supabase RO synced v%s segs=%d session=%s", version, n, self.session_id)
         except Exception as e:
             logger.error("Failed to update running order in Supabase: %s", e)

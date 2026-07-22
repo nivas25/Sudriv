@@ -23,13 +23,19 @@ type RunningOrderPayload = {
   totalDurationSeconds: number;
   segments: RunningOrderSegment[];
   activeSegment: RunningOrderSegment | null;
+  source?: string;
   error?: string;
 };
 
-const POLL_MS = 1500;
+const POLL_MS = 1200;
 
 /**
- * Live running order — API fetch + fast poll + manual refresh.
+ * Live running order — Redis-backed API + poll + manual refresh.
+ *
+ * Realtime was removed: Timeline / Teleprompter / Metadata each call this
+ * hook, and Supabase reuses channel names → second mount hits
+ * "cannot add postgres_changes callbacks after subscribe()".
+ * Agent writes Redis first; the API prefers Redis, so poll is enough.
  */
 export function useRunningOrder(sessionId: string) {
   const [segments, setSegments] = useState<RunningOrderSegment[]>([]);
@@ -44,6 +50,7 @@ export function useRunningOrder(sessionId: string) {
   const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null);
   const lastFingerprintRef = useRef<string>("");
   const inFlightRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const load = useCallback(
     async (reason: string) => {
@@ -52,19 +59,21 @@ export function useRunningOrder(sessionId: string) {
         return;
       }
 
-      // Avoid stacking poll requests; manual refresh always runs.
-      if (inFlightRef.current && reason !== "manual") return;
+      // Manual always runs; poll skips if a request is already in flight
+      if (inFlightRef.current && reason === "poll") return;
       inFlightRef.current = true;
 
       const isManual = reason === "manual";
       if (isManual) setIsRefreshing(true);
 
       try {
-        // Cache-bust so browsers / proxies never serve stale RO
         const url = `/api/session/${sessionId}/running-order?t=${Date.now()}&r=${encodeURIComponent(reason)}`;
         const res = await fetch(url, {
           cache: "no-store",
-          headers: { "Cache-Control": "no-cache" },
+          headers: {
+            "Cache-Control": "no-cache",
+            Pragma: "no-cache",
+          },
         });
 
         if (!res.ok) {
@@ -76,20 +85,26 @@ export function useRunningOrder(sessionId: string) {
             msg,
             sessionId,
           });
-          setError(msg);
+          if (mountedRef.current) setError(msg);
           return;
         }
 
         const data: RunningOrderPayload = await res.json();
+        if (!mountedRef.current) return;
+
         const segs = Array.isArray(data.segments) ? data.segments : [];
         const fingerprint = `${data.version}:${segs.length}:${segs
-          .map((s) => `${s.id}:${s.position}:${s.title}`)
+          .map(
+            (s) =>
+              `${s.id}:${s.position}:${s.title}:${s.duration_seconds}:${s.start_offset_seconds ?? 0}:${s.status}`,
+          )
           .join("|")}`;
 
         const changed = fingerprint !== lastFingerprintRef.current;
         if (changed || isManual) {
           console.info("[useRunningOrder] update", {
             reason,
+            source: data.source ?? "?",
             version: data.version,
             segments: segs.length,
             active: data.activeSegment?.title ?? null,
@@ -99,7 +114,6 @@ export function useRunningOrder(sessionId: string) {
           lastFingerprintRef.current = fingerprint;
         }
 
-        // Always apply state so manual refresh re-renders even if data identical
         setSegments(segs);
         setTotalDuration(data.totalDurationSeconds ?? 0);
         setVersion(data.version ?? 0);
@@ -108,13 +122,17 @@ export function useRunningOrder(sessionId: string) {
         setLastFetchedAt(Date.now());
       } catch (e) {
         console.error("[useRunningOrder] network error", reason, e);
-        setError(
-          e instanceof Error ? e.message : "Failed to load running order",
-        );
+        if (mountedRef.current) {
+          setError(
+            e instanceof Error ? e.message : "Failed to load running order",
+          );
+        }
       } finally {
         inFlightRef.current = false;
-        setIsLoading(false);
-        if (isManual) setIsRefreshing(false);
+        if (mountedRef.current) {
+          setIsLoading(false);
+          if (isManual) setIsRefreshing(false);
+        }
       }
     },
     [sessionId],
@@ -125,6 +143,7 @@ export function useRunningOrder(sessionId: string) {
   }, [load]);
 
   useEffect(() => {
+    mountedRef.current = true;
     void load("mount");
 
     const id = window.setInterval(() => {
@@ -136,11 +155,11 @@ export function useRunningOrder(sessionId: string) {
     };
     document.addEventListener("visibilitychange", onVis);
 
-    // Custom event so other UI can force a timeline refresh after apply
     const onForce = () => void load("event");
     window.addEventListener("sudriv:running-order-refresh", onForce);
 
     return () => {
+      mountedRef.current = false;
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("sudriv:running-order-refresh", onForce);

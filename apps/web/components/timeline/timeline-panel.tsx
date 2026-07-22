@@ -70,7 +70,12 @@ export function TimelinePanel({ sessionId }: { sessionId: string }) {
           </div>
         ) : (
           segments.map((segment) => (
-            <TimelineSegment key={segment.id} segment={segment as any} />
+            <TimelineSegment
+              // Include version + position so React remounts after agent apply
+              // (segment UUIDs can change when agent rewrites the RO).
+              key={`v${version}-${segment.position}-${segment.id}`}
+              segment={segment as any}
+            />
           ))
         )}
       </div>

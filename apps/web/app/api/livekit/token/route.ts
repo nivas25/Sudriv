@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   AccessToken,
+  AgentDispatchClient,
   RoomServiceClient,
   RoomAgentDispatch,
   RoomConfiguration,
@@ -16,8 +17,8 @@ import {
 /**
  * POST /api/livekit/token
  *
- * Issues a producer token AND ensures the room requests the Sudriv agent
- * with restart-on-failure so mid-session agent crashes re-dispatch.
+ * Issues a producer token AND dispatches the named Sudriv agent into the room.
+ * Worker must register with the same agent_name (default: "sudriv").
  */
 export async function POST(request: Request) {
   try {
@@ -55,10 +56,10 @@ export async function POST(request: Request) {
       session_id: sessionId,
       user_id: authData.user.id,
     });
+
     const agentDispatch = new RoomAgentDispatch({
       agentName: SUDRIV_AGENT_NAME,
       metadata: roomMetadata,
-      // Cloud: re-dispatch worker if job process dies mid-session
       restartPolicy: JobRestartPolicy.JRP_ON_FAILURE,
     });
 
@@ -71,7 +72,6 @@ export async function POST(request: Request) {
         emptyTimeout: 60 * 30,
         departureTimeout: 60,
         metadata: roomMetadata,
-        // Bind agent to this room at creation time
         agents: [agentDispatch],
       });
       console.info("[livekit/token] room created", roomName);
@@ -84,6 +84,24 @@ export async function POST(request: Request) {
         await rooms.updateRoomMetadata(roomName, roomMetadata);
       } catch {
         // non-fatal
+      }
+      // Ensure agent is dispatched even if room already exists
+      try {
+        const dispatch = new AgentDispatchClient(httpHost, apiKey, apiSecret);
+        const existing = await dispatch.listDispatch(roomName);
+        const hasOurs = existing.some((d) => d.agentName === SUDRIV_AGENT_NAME);
+        if (!hasOurs) {
+          await dispatch.createDispatch(roomName, SUDRIV_AGENT_NAME, {
+            metadata: roomMetadata,
+            restartPolicy: JobRestartPolicy.JRP_ON_FAILURE,
+          });
+          console.info("[livekit/token] agent dispatch created", roomName);
+        }
+      } catch (dispErr) {
+        console.warn(
+          "[livekit/token] explicit dispatch:",
+          dispErr instanceof Error ? dispErr.message : dispErr,
+        );
       }
     }
 
@@ -107,7 +125,7 @@ export async function POST(request: Request) {
       canUpdateOwnMetadata: true,
     });
 
-    // Dispatch agent when THIS participant joins (existing rooms + first join)
+    // Dispatch named agent when this participant joins
     try {
       token.roomConfig = new RoomConfiguration({
         agents: [agentDispatch],

@@ -14,7 +14,8 @@ logger = logging.getLogger("sudriv-agent.plugins.sarvam_tts")
 # Hindi newsroom voice defaults
 DEFAULT_SPEAKER = os.environ.get("SARVAM_TTS_SPEAKER", "priya")
 DEFAULT_LANGUAGE = os.environ.get("SARVAM_TTS_LANGUAGE", "hi-IN")
-DEFAULT_PACE = float(os.environ.get("SARVAM_TTS_PACE", "0.95"))
+# Slightly slower than 1.0 reads warmer / more natural on IFB
+DEFAULT_PACE = float(os.environ.get("SARVAM_TTS_PACE", "0.92"))
 
 
 def create_sarvam_tts(
@@ -25,11 +26,11 @@ def create_sarvam_tts(
     target_language_code: str | None = None,
     speech_sample_rate: int = 22050,
     pace: float | None = None,
-    temperature: float = 0.35,
-    # Sarvam plugin enforces min_buffer_size in [30, 200] (default 50).
-    # Use the plugin default — values < 30 crash the entire job at startup.
-    min_buffer_size: int = 50,
-    max_chunk_length: int = 150,
+    # Mild randomness so speech doesn't sound flat/robotic
+    temperature: float = 0.4,
+    # Balanced: smooth enough, but short chunks so interrupt cuts audio fast
+    min_buffer_size: int = 40,
+    max_chunk_length: int = 90,
     output_audio_bitrate: str = "128k",
     # PCM avoids MP3 decode glitches in the LiveKit path
     output_audio_codec: str = "linear16",
@@ -56,6 +57,12 @@ def create_sarvam_tts(
         output_audio_codec=output_audio_codec,
         send_completion_event=True,
     )
+
+    # Plugin pool prewarm hardcodes 10s — raise so greeting TTS does not time out
+    # when STT is also opening a WebSocket (observed TimeoutError in prod).
+    pool = getattr(tts, "_pool", None)
+    if pool is not None:
+        pool._connect_timeout = 30.0
 
     logger.info(
         "TTS ready speaker=%s lang=%s rate=%d codec=%s pace=%.2f",

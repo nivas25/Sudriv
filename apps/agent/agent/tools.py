@@ -22,7 +22,7 @@ from datetime import datetime
 from livekit.agents import llm
 
 from agent.confirmation import ConfirmationGuard
-from agent.session import SessionManager, supabase_client, redis_client, run_sync
+from agent.session import SessionManager, supabase_client, redis_client
 
 logger = logging.getLogger("sudriv-agent.tools")
 
@@ -56,6 +56,21 @@ _INSTRUCTION_TYPE_ALIASES = {
 
 def slugify(text: str) -> str:
     return text.lower().replace(" ", "-")
+
+
+def speak_duration(seconds: int) -> str:
+    """Human duration for LLM speech (never '3m0s')."""
+    sec = int(seconds or 0)
+    sign = "कम " if sec < 0 else ""
+    sec = abs(sec)
+    mins, rem = divmod(sec, 60)
+    if mins == 0:
+        return f"{sign}{rem} सेकंड"
+    if rem == 0:
+        if mins == 1:
+            return f"{sign}1 मिनट"
+        return f"{sign}{mins} मिनट"
+    return f"{sign}{mins} मिनट {rem} सेकंड"
 
 
 def normalize_instruction_type(raw: str | None) -> str:
@@ -99,22 +114,20 @@ class SudrivToolkit:
             return "Error: Unable to fetch the running order. Please try again."
 
     def _format_running_order(self, ro: dict) -> str:
-        """Compact running-order table for the conversation LLM (no teleprompter text)."""
+        """Compact running-order for the LLM (natural durations, no teleprompter)."""
         segments = sorted(ro.get("segments", []), key=lambda s: s["position"])
-        total_mins = ro.get("total_duration_seconds", 0) // 60
+        total = ro.get("total_duration_seconds", 0)
 
         lines = [
-            f"RO v{ro.get('version', 1)} | {len(segments)} segs | {total_mins} min total"
+            f"RO v{ro.get('version', 1)} | total {speak_duration(total)}"
         ]
         for seg in segments:
-            offset_mins, offset_secs = divmod(seg.get("start_offset_seconds", 0), 60)
-            dur_mins, dur_secs = divmod(seg["duration_seconds"], 60)
+            start = int(seg.get("start_offset_seconds", 0) or 0)
             lines.append(
-                f"{seg['position']}. {seg['title'][:50]} "
-                f"@{offset_mins:02d}:{offset_secs:02d} "
-                f"{dur_mins}m{dur_secs:02d}s "
-                f"{seg.get('segment_type', 'package')}/"
-                f"{seg.get('status', 'pending')}"
+                f"स्लॉट {seg['position']}: {str(seg['title'])[:50]} "
+                f"— {speak_duration(seg['duration_seconds'])}, "
+                f"शुरुआत ~{speak_duration(start)} पर, "
+                f"{seg.get('segment_type', 'package')}/{seg.get('status', 'pending')}"
             )
         return "\n".join(lines)
 
@@ -356,45 +369,46 @@ class SudrivToolkit:
         }
 
     def _format_impact(self, impact: dict) -> str:
-        """Format impact analysis for LLM consumption."""
-        lines = ["Impact Analysis:"]
-        lines.append(f"Action: {impact['action']}")
-        lines.append(f"Duration change: {impact['duration_change_seconds']:+d} seconds")
-        lines.append(
-            f"New total: {impact['new_total_duration'] // 60} minutes "
-            f"(was {impact['old_total_duration'] // 60} minutes)"
-        )
-        
+        """Format impact for LLM — natural Hindi-friendly durations (no 3m0s)."""
+        delta = impact["duration_change_seconds"]
+        lines = [
+            f"क्रिया: {impact['action']}",
+            f"अवधि बदलाव: {speak_duration(delta)}"
+            + (" बढ़ेगी" if delta > 0 else " बचेगी" if delta < 0 else " (कोई बदलाव नहीं)"),
+            f"नया कुल: {speak_duration(impact['new_total_duration'])} "
+            f"(पहले {speak_duration(impact['old_total_duration'])})",
+        ]
+
         if impact["affected_segments"]:
-            lines.append("\nAffected segments:")
-            for seg in impact["affected_segments"]:
-                parts = [f"  - {seg['title']}"]
+            lines.append("असर:")
+            for seg in impact["affected_segments"][:5]:
+                bits = [str(seg.get("title", "?"))]
                 if "old_position" in seg and "new_position" in seg:
-                    parts.append(f"moves from slot {seg['old_position']} to {seg['new_position']}")
-                if "delay_seconds" in seg:
-                    delay = seg["delay_seconds"]
-                    if delay > 0:
-                        parts.append(f"starts {delay // 60}m{delay % 60:02d}s later")
-                    elif delay < 0:
-                        parts.append(f"starts {abs(delay) // 60}m{abs(delay) % 60:02d}s earlier")
-                parts_str = ", ".join(parts[1:])
-                lines.append(f"{parts[0]}: {parts_str}" if parts_str else parts[0])
-        
-        if impact["duration_change_seconds"] > 0 and impact["suggestions"]:
-            lines.append("\nSuggestions to stay within original duration:")
-            for sug in impact["suggestions"]:
-                lines.append(f"  • {sug}")
-        
+                    bits.append(
+                        f"स्लॉट {seg['old_position']} → {seg['new_position']}"
+                    )
+                if "delay_seconds" in seg and seg["delay_seconds"]:
+                    d = seg["delay_seconds"]
+                    if d > 0:
+                        bits.append(f"{speak_duration(d)} देर से")
+                    else:
+                        bits.append(f"{speak_duration(d)} पहले")
+                lines.append("  - " + ", ".join(bits))
+
+        lines.append(
+            "बोलते समय: मिनट/सेकंड साधारण हिंदी में; "
+            "एक बार पुष्टि माँगें; हाँ मिलते ही apply करें — दोबारा न पूछें।"
+        )
         return "\n".join(lines)
 
     # ─── Tool 3: Propose ──────────────────────────────────────────────────────
 
     @llm.function_tool(
         description=(
-            "Create a formal proposal for a running order change. "
-            "This stores the proposal and prepares it for the producer's confirmation. "
-            "ALWAYS call analyze_impact BEFORE this tool. "
-            "After calling this tool, you MUST ask the producer for confirmation before applying."
+            "Store a pending running-order change. Call analyze_impact first. "
+            "Then tell the producer ONCE in short Hindi what you will do + impact, "
+            "and ask once 'कर दूँ?'. On their next haan/confirm, call apply_timeline_update "
+            "immediately — do not propose again or re-ask."
         )
     )
     async def propose_timeline_update(
@@ -452,52 +466,53 @@ class SudrivToolkit:
         }
         
         proposal_id = await self.confirmation_guard.create_proposal(proposal)
-
-        # Persist to Supabase for audit (off event loop — sync client)
+        
+        # Also persist to Supabase for audit
         try:
-            def _persist_proposal() -> None:
-                supabase_client().table("proposals").insert({
-                    "id": proposal_id,
-                    "session_id": self.session.session_id,
-                    "proposal_type": action,
-                    "proposed_changes": proposal["proposed_changes"],
-                    "impact_analysis": proposal["impact_analysis"],
-                    "status": "pending",
-                }).execute()
-
-            await run_sync(_persist_proposal)
+            supabase = supabase_client()
+            supabase.table("proposals").insert({
+                "id": proposal_id,
+                "session_id": self.session.session_id,
+                "proposal_type": action,
+                "proposed_changes": proposal["proposed_changes"],
+                "impact_analysis": proposal["impact_analysis"],
+                "status": "pending",
+            }).execute()
         except Exception as e:
             logger.error(f"Failed to persist proposal to Supabase: {e}")
-
+        
         return (
-            f"Proposal created (ID: {proposal_id[:8]}). "
-            f"Summary: {summary}. "
-            f"Impact: {impact_summary}. "
-            f"IMPORTANT: Ask the producer for confirmation before applying."
+            f"Proposal ready (id {proposal_id[:8]}). "
+            f"Summary: {summary}. Impact: {impact_summary}. "
+            f"SPEAK once in short Hindi + ask once 'कर दूँ?'. "
+            f"On haan/confirm/ठीक/कर दो → call apply_timeline_update immediately. "
+            f"Do NOT ask confirmation twice."
         )
 
     # ─── Tool 4: Apply ────────────────────────────────────────────────────────
 
     @llm.function_tool(
         description=(
-            "Apply the previously proposed and CONFIRMED timeline update. "
-            "This tool can ONLY be called after the producer has explicitly confirmed "
-            "the pending proposal. If no proposal is confirmed, this will fail. "
-            "NEVER call this without explicit producer confirmation."
+            "Apply the pending proposal AFTER the producer said yes once "
+            "(haan, हाँ, ठीक, कर दो, apply, confirm, ok). "
+            "Call this immediately on that turn — never re-ask. "
+            "Also updates Anchor Script / teleprompter automatically."
         )
     )
     async def apply_timeline_update(
         self,
-        producer_confirmation: Annotated[str, "The exact words the producer used to confirm (e.g., 'yes, apply it')"],
+        producer_confirmation: Annotated[
+            str,
+            "Producer's confirm words, e.g. 'haan', 'kar do', 'confirm', 'ठीक है'",
+        ],
     ) -> str:
-        """Apply the confirmed proposal to the running order."""
+        """Apply the confirmed proposal to the running order + anchor script."""
         
         # Safety check
         if not self.confirmation_guard.can_apply():
             return (
-                "ERROR: Cannot apply — no confirmed proposal. "
-                "You must first create a proposal with propose_timeline_update, "
-                "then get explicit confirmation from the producer."
+                "ERROR: No pending proposal to apply. "
+                "First propose_timeline_update, then apply only after producer says yes."
             )
         
         proposal = self.session.pending_proposal
@@ -534,63 +549,61 @@ class SudrivToolkit:
             
             # Apply to Redis + Supabase
             await self.session.update_running_order(new_ro)
-
+            
+            supabase = supabase_client()
+            # If a news item was used, mark it
             news_item_id = proposal["proposed_changes"].get("news_item_id")
-            proposal_id = self.confirmation_guard.current_proposal_id
-            producer_response = producer_confirmation
-            session_id = self.session.session_id
-            proposal_type = proposal["proposal_type"]
-            proposal_summary = proposal["summary"]
-            ro_version = new_ro["version"]
-
-            def _post_apply_db() -> None:
-                supabase = supabase_client()
-                if news_item_id:
-                    try:
-                        supabase.table("news_items").update(
-                            {"is_used": True}
-                        ).eq("id", news_item_id).execute()
-                    except Exception as e:
-                        logger.error("Failed to update news item status: %s", e)
+            if news_item_id:
                 try:
-                    supabase.table("proposals").update({
-                        "status": "confirmed",
-                        "producer_response": producer_response,
-                        "resolved_at": datetime.utcnow().isoformat(),
-                    }).eq("id", proposal_id).execute()
+                    supabase.table("news_items") \
+                        .update({"is_used": True}) \
+                        .eq("id", news_item_id) \
+                        .execute()
                 except Exception as e:
-                    logger.error("Failed to update proposal status: %s", e)
-                try:
-                    supabase.table("session_events").insert({
-                        "session_id": session_id,
-                        "event_type": "running_order_updated",
-                        "payload": {
-                            "version": ro_version,
-                            "action": proposal_type,
-                            "summary": proposal_summary,
-                        },
-                        "source": "agent",
-                    }).execute()
-                except Exception as e:
-                    logger.error("Failed to log session event: %s", e)
-
+                    logger.error(f"Failed to update news item status: {e}")
+            
+            # Update proposal status in Supabase
             try:
-                await run_sync(_post_apply_db)
+                supabase.table("proposals") \
+                    .update({
+                        "status": "confirmed",
+                        "producer_response": producer_confirmation,
+                        "resolved_at": datetime.utcnow().isoformat(),
+                    }) \
+                    .eq("id", self.confirmation_guard.current_proposal_id) \
+                    .execute()
             except Exception as e:
-                logger.error("Post-apply Supabase work failed: %s", e)
-
+                logger.error(f"Failed to update proposal status in Supabase: {e}")
+            
+            # Log event
+            try:
+                supabase.table("session_events").insert({
+                    "session_id": self.session.session_id,
+                    "event_type": "running_order_updated",
+                    "payload": {
+                        "version": new_ro["version"],
+                        "action": proposal["proposal_type"],
+                        "summary": proposal["summary"],
+                    },
+                    "source": "agent",
+                }).execute()
+            except Exception as e:
+                logger.error(f"Failed to log session event: {e}")
+            
             # Mark applied in confirmation guard
             await self.confirmation_guard.mark_applied()
-            
+
+            # Auto-update Anchor Script / teleprompter (do not wait for a 2nd tool call)
+            anchor_note = await self._auto_anchor_after_apply(proposal)
+
             # Release lock
             await redis.delete(lock_key)
-            
+
+            total_spoken = speak_duration(new_ro["total_duration_seconds"])
             return (
-                f"Timeline updated successfully (version {new_ro['version']}). "
-                f"{len(new_ro['segments'])} segments, "
-                f"total duration {new_ro['total_duration_seconds'] // 60} minutes. "
-                f"Teleprompter and timeline are synced. "
-                f"Now generate the anchor instruction using push_anchor_instruction."
+                f"APPLIED v{new_ro['version']}. Total now {total_spoken}. {anchor_note} "
+                f"Reply in one short friendly Hindi line: done + what changed "
+                f"(anchor script updated). No second confirm, no full list."
             )
         
         except Exception as e:
@@ -598,6 +611,45 @@ class SudrivToolkit:
             await redis.delete(lock_key)
             logger.error(f"Failed to apply timeline update: {e}")
             return f"ERROR: Failed to apply update: {str(e)}. Running order is unchanged."
+
+    async def _auto_anchor_after_apply(self, proposal: dict) -> str:
+        """Push a short anchor cue + teleprompter after timeline apply."""
+        try:
+            action = proposal.get("proposal_type") or proposal.get("proposed_changes", {}).get(
+                "action", "update"
+            )
+            summary = (proposal.get("summary") or action).strip()
+            changes = proposal.get("proposed_changes") or {}
+            title = changes.get("new_segment_title") or ""
+            pos = changes.get("target_position") or changes.get("move_to_position")
+
+            # Concise Hindi cue for the anchor panel / teleprompter
+            if action == "insert" and title:
+                cue = f"अगला: स्लॉट {pos} पर '{title}' जोड़ दिया गया है। उसी क्रम से आगे बढ़ें।"
+                itype = "breaking" if "break" in summary.lower() else "transition"
+            elif action == "remove":
+                cue = f"स्लॉट {pos} हटाया गया। रनिंग ऑर्डर अपडेट — अगले आइटम पर जाएँ।"
+                itype = "transition"
+            elif action == "reorder":
+                cue = f"क्रम बदला: स्लॉट {changes.get('target_position')} → {changes.get('move_to_position')}। नए क्रम से पढ़ें।"
+                itype = "transition"
+            elif action == "modify_duration":
+                cue = f"स्लॉट {pos} की अवधि बदली। टाइमिंग ध्यान रखें।"
+                itype = "timing"
+            else:
+                cue = f"रनिंग ऑर्डर अपडेट: {summary[:120]}"
+                itype = "general"
+
+            result = await self._deliver_anchor_instruction(
+                instruction_text=cue,
+                instruction_type=itype,
+                segment_id=None,
+                preferred_position=int(pos) if pos else None,
+            )
+            return result
+        except Exception as e:
+            logger.warning("Auto anchor after apply failed: %s", e)
+            return "Anchor script auto-update failed — you may call push_anchor_instruction."
 
     def _validate_running_order(self, ro: dict) -> list[str]:
         """Validate running order invariants. Returns list of errors (empty = valid)."""
@@ -644,52 +696,66 @@ class SudrivToolkit:
 
     @llm.function_tool(
         description=(
-            "Generate and push a clean instruction for the anchor. "
-            "This should be called after a timeline update is applied. "
-            "The instruction should be clear, concise, and actionable — "
-            "the anchor is live on air and needs to know exactly what to do next. "
-            "Do NOT include internal reasoning or impact analysis in the instruction."
+            "Optional: push an extra anchor cue. "
+            "Usually NOT needed after apply_timeline_update (auto-updates script). "
+            "Use only if producer asks for a different anchor message."
         )
     )
     async def push_anchor_instruction(
         self,
         instruction_text: Annotated[
             str,
-            "The clean instruction text for the anchor. Must be concise and actionable.",
+            "Short actionable Hindi/English cue for the anchor (1–2 lines).",
         ],
         instruction_type: Annotated[
             str,
-            "ONLY one of: transition | breaking | correction | timing | general. "
-            "Never use values like 'segment' or 'update'.",
+            "ONLY one of: transition | breaking | correction | timing | general.",
         ] = "transition",
         segment_id: Annotated[
             Optional[str],
-            "The UUID of the related segment, if applicable. Must be a valid UUID string.",
+            "Related segment UUID if known.",
         ] = None,
     ) -> str:
-        """Generate and store an anchor instruction + update segment teleprompter if possible."""
+        """Store anchor instruction + update teleprompter / Anchor Script panel."""
+        return await self._deliver_anchor_instruction(
+            instruction_text=instruction_text,
+            instruction_type=instruction_type,
+            segment_id=segment_id,
+            preferred_position=None,
+        )
+
+    async def _deliver_anchor_instruction(
+        self,
+        *,
+        instruction_text: str,
+        instruction_type: str = "transition",
+        segment_id: Optional[str] = None,
+        preferred_position: Optional[int] = None,
+    ) -> str:
+        """Shared path: DB anchor_instructions + segment teleprompter + Redis cache."""
+        import asyncio
 
         itype = normalize_instruction_type(instruction_type)
+        text = (instruction_text or "").strip()
+        if not text:
+            return "ERROR: empty anchor instruction"
 
-        # Validate segment_id is a UUID
         if segment_id:
             try:
                 uuid.UUID(segment_id)
             except ValueError:
-                logger.warning(
-                    "Invalid UUID for segment_id: %s — clearing", segment_id
-                )
+                logger.warning("Invalid segment_id %s — clearing", segment_id)
                 segment_id = None
 
-        # If no segment_id, attach to first pending / first segment in local RO
-        if not segment_id:
-            segs = sorted(
-                self.session.running_order.get("segments", []),
-                key=lambda s: s.get("position", 0),
-            )
+        segs_local = sorted(
+            self.session.running_order.get("segments", []),
+            key=lambda s: s.get("position", 0),
+        )
+
+        if not segment_id and preferred_position is not None:
             pick = next(
-                (s for s in segs if s.get("status") in ("on_air", "pending")),
-                segs[0] if segs else None,
+                (s for s in segs_local if int(s.get("position", 0)) == preferred_position),
+                None,
             )
             if pick and pick.get("id"):
                 try:
@@ -698,106 +764,117 @@ class SudrivToolkit:
                 except ValueError:
                     segment_id = None
 
-        try:
-            session_id = self.session.session_id
-            local_segments = self.session.running_order.get("segments", [])
+        if not segment_id:
+            pick = next(
+                (s for s in segs_local if s.get("status") in ("on_air", "pending")),
+                segs_local[0] if segs_local else None,
+            )
+            if pick and pick.get("id"):
+                try:
+                    uuid.UUID(str(pick["id"]))
+                    segment_id = str(pick["id"])
+                except ValueError:
+                    segment_id = None
 
-            def _push_instruction() -> tuple[str, Optional[str], Optional[int]]:
-                """Returns (instruction_id, new_teleprompter_text, target_position)."""
-                supabase = supabase_client()
-                result = (
-                    supabase.table("anchor_instructions")
-                    .insert(
-                        {
-                            "session_id": session_id,
-                            "segment_id": segment_id,
-                            "instruction_text": instruction_text,
-                            "instruction_type": itype,
-                            "status": "pending",
-                        }
-                    )
+        session_id = self.session.session_id
+
+        def _write() -> tuple[str, Optional[str], Optional[int]]:
+            supabase = supabase_client()
+            result = (
+                supabase.table("anchor_instructions")
+                .insert(
+                    {
+                        "session_id": session_id,
+                        "segment_id": segment_id,
+                        "instruction_text": text,
+                        "instruction_type": itype,
+                        "status": "pending",
+                    }
+                )
+                .execute()
+            )
+            instruction_id = result.data[0]["id"] if result.data else "unknown"
+            new_text: Optional[str] = None
+            target_pos: Optional[int] = preferred_position
+
+            ro = (
+                supabase.table("running_orders")
+                .select("id")
+                .eq("session_id", session_id)
+                .order("version", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if ro.data:
+                ro_id = ro.data[0]["id"]
+                segs_db = (
+                    supabase.table("segments")
+                    .select("id, title, position, teleprompter_text")
+                    .eq("running_order_id", ro_id)
+                    .order("position")
                     .execute()
                 )
-                instruction_id = result.data[0]["id"] if result.data else "unknown"
-                new_text: Optional[str] = None
-                target_pos: Optional[int] = None
+                target = None
+                rows = segs_db.data or []
+                if preferred_position is not None:
+                    target = next(
+                        (s for s in rows if s.get("position") == preferred_position),
+                        None,
+                    )
+                if not target and segment_id:
+                    target = next((s for s in rows if s["id"] == segment_id), None)
+                if not target and rows:
+                    target = rows[0]
 
-                if segment_id and instruction_text:
-                    try:
-                        ro = (
-                            supabase.table("running_orders")
-                            .select("id")
-                            .eq("session_id", session_id)
-                            .order("version", desc=True)
-                            .limit(1)
-                            .execute()
-                        )
-                        if ro.data:
-                            ro_id = ro.data[0]["id"]
-                            segs_db = (
-                                supabase.table("segments")
-                                .select("id, title, position, teleprompter_text")
-                                .eq("running_order_id", ro_id)
-                                .order("position")
-                                .execute()
-                            )
-                            target = None
-                            for s in segs_db.data or []:
-                                if s["id"] == segment_id:
-                                    target = s
-                                    break
-                            if not target and segs_db.data:
-                                target = segs_db.data[0]
+                if target:
+                    prev = (target.get("teleprompter_text") or "").strip()
+                    # Replace previous auto cue block to avoid stacking
+                    if "[ANCHOR CUE]" in prev:
+                        prev = prev.split("[ANCHOR CUE]")[0].rstrip()
+                    cue = f"\n\n[ANCHOR CUE]\n{text}"
+                    new_text = f"{prev}{cue}" if prev else f"{target.get('title', '')}{cue}"
+                    supabase.table("segments").update(
+                        {"teleprompter_text": new_text}
+                    ).eq("id", target["id"]).execute()
+                    target_pos = target.get("position")
 
-                            if target:
-                                prev = (target.get("teleprompter_text") or "").strip()
-                                cue = f"\n\n[ANCHOR CUE]\n{instruction_text}"
-                                new_text = (
-                                    f"{prev}{cue}"
-                                    if prev
-                                    else f"{target.get('title', '')}{cue}"
-                                )
-                                supabase.table("segments").update(
-                                    {"teleprompter_text": new_text}
-                                ).eq("id", target["id"]).execute()
-                                target_pos = target.get("position")
-                    except Exception as te:
-                        logger.warning("Could not update segment teleprompter: %s", te)
+            try:
+                supabase.table("session_events").insert(
+                    {
+                        "session_id": session_id,
+                        "event_type": "anchor_instruction_sent",
+                        "payload": {
+                            "instruction_id": instruction_id,
+                            "instruction_type": itype,
+                            "instruction_text": text,
+                        },
+                        "source": "agent",
+                    }
+                ).execute()
+            except Exception as ee:
+                logger.warning("session_events insert skipped: %s", ee)
 
-                try:
-                    supabase.table("session_events").insert(
-                        {
-                            "session_id": session_id,
-                            "event_type": "anchor_instruction_sent",
-                            "payload": {
-                                "instruction_id": instruction_id,
-                                "instruction_type": itype,
-                                "instruction_text": instruction_text,
-                            },
-                            "source": "agent",
-                        }
-                    ).execute()
-                except Exception as ee:
-                    logger.warning("session_events insert skipped: %s", ee)
+            return instruction_id, new_text, target_pos
 
-                return instruction_id, new_text, target_pos
+        try:
+            _iid, new_text, target_pos = await asyncio.to_thread(_write)
 
-            _iid, new_text, target_pos = await run_sync(_push_instruction)
-
-            # Keep in-memory RO in sync (main thread / event loop only)
             if new_text is not None:
-                for s in local_segments:
-                    if (
-                        target_pos is not None and s.get("position") == target_pos
-                    ) or s.get("id") == segment_id:
+                for s in self.session.running_order.get("segments", []):
+                    if target_pos is not None and s.get("position") == target_pos:
                         s["teleprompter_text"] = new_text
                         break
+                # Keep Redis RO in sync so Anchor Script UI polls fresh text
+                try:
+                    redis = redis_client()
+                    await redis.set(
+                        f"running_order:{session_id}",
+                        json.dumps(self.session.running_order),
+                    )
+                except Exception as re:
+                    logger.warning("Redis teleprompter sync failed: %s", re)
 
-            return (
-                f"Anchor instruction delivered ({itype}): \"{instruction_text}\". "
-                f"Teleprompter/script panel will refresh."
-            )
-
+            return f"Anchor script updated ({itype}): \"{text}\""
         except Exception as e:
             logger.error("Failed to push anchor instruction: %s", e)
             return f"ERROR: Failed to deliver anchor instruction: {str(e)}"
