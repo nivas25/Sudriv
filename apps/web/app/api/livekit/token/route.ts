@@ -1,12 +1,23 @@
 import { NextResponse } from "next/server";
-import { AccessToken } from "livekit-server-sdk";
+import {
+  AccessToken,
+  RoomServiceClient,
+  RoomAgentDispatch,
+  RoomConfiguration,
+  JobRestartPolicy,
+} from "livekit-server-sdk";
 import { createClient } from "@/lib/supabase/server";
+import {
+  SUDRIV_AGENT_NAME,
+  livekitHttpHost,
+  roomNameForSession,
+} from "@/lib/livekit/config";
 
 /**
  * POST /api/livekit/token
  *
- * Generates a short-lived LiveKit access token for the producer to join a room.
- * Also sets room metadata so the agent can read the session_id.
+ * Issues a producer token AND ensures the room requests the Sudriv agent
+ * with restart-on-failure so mid-session agent crashes re-dispatch.
  */
 export async function POST(request: Request) {
   try {
@@ -15,11 +26,10 @@ export async function POST(request: Request) {
     if (!sessionId) {
       return NextResponse.json(
         { error: "sessionId is required" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    // Validate user is authenticated
     const supabase = await createClient();
     const { data: authData, error: authError } = await supabase.auth.getUser();
     if (authError || !authData.user) {
@@ -31,20 +41,56 @@ export async function POST(request: Request) {
     const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
 
     if (!apiKey || !apiSecret || !livekitUrl) {
-      console.error("[livekit/token] Missing LIVEKIT_API_KEY, LIVEKIT_API_SECRET, or NEXT_PUBLIC_LIVEKIT_URL");
+      console.error(
+        "[livekit/token] Missing LIVEKIT_API_KEY, LIVEKIT_API_SECRET, or NEXT_PUBLIC_LIVEKIT_URL",
+      );
       return NextResponse.json(
         { error: "LiveKit credentials not configured" },
-        { status: 500 }
+        { status: 500 },
       );
     }
 
-    // Room name must be consistent — the agent worker will be dispatched to this room
-    const roomName = `sudriv-${sessionId}`;
+    const roomName = roomNameForSession(sessionId);
+    const roomMetadata = JSON.stringify({
+      session_id: sessionId,
+      user_id: authData.user.id,
+    });
+    const agentDispatch = new RoomAgentDispatch({
+      agentName: SUDRIV_AGENT_NAME,
+      metadata: roomMetadata,
+      // Cloud: re-dispatch worker if job process dies mid-session
+      restartPolicy: JobRestartPolicy.JRP_ON_FAILURE,
+    });
 
-    // Create access token for the producer
+    const httpHost = livekitHttpHost(livekitUrl);
+    const rooms = new RoomServiceClient(httpHost, apiKey, apiSecret);
+
+    try {
+      await rooms.createRoom({
+        name: roomName,
+        emptyTimeout: 60 * 30,
+        departureTimeout: 60,
+        metadata: roomMetadata,
+        // Bind agent to this room at creation time
+        agents: [agentDispatch],
+      });
+      console.info("[livekit/token] room created", roomName);
+    } catch (roomErr) {
+      console.info(
+        "[livekit/token] createRoom (may already exist):",
+        roomErr instanceof Error ? roomErr.message : roomErr,
+      );
+      try {
+        await rooms.updateRoomMetadata(roomName, roomMetadata);
+      } catch {
+        // non-fatal
+      }
+    }
+
     const token = new AccessToken(apiKey, apiSecret, {
       identity: `producer-${authData.user.id}`,
       name: authData.user.email?.split("@")[0] || "Producer",
+      ttl: "6h",
       metadata: JSON.stringify({
         role: "producer",
         sessionId,
@@ -52,27 +98,44 @@ export async function POST(request: Request) {
     });
 
     token.addGrant({
-      room: roomName,
       roomJoin: true,
+      room: roomName,
+      roomCreate: true,
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
+      canUpdateOwnMetadata: true,
     });
+
+    // Dispatch agent when THIS participant joins (existing rooms + first join)
+    try {
+      token.roomConfig = new RoomConfiguration({
+        agents: [agentDispatch],
+      });
+    } catch (cfgErr) {
+      console.warn(
+        "[livekit/token] roomConfig skipped:",
+        cfgErr instanceof Error ? cfgErr.message : cfgErr,
+      );
+    }
 
     const jwt = await token.toJwt();
 
-    console.log(`[livekit/token] Token generated for room: ${roomName}, user: ${authData.user.email}`);
+    console.log(
+      `[livekit/token] token ok room=${roomName} agent=${SUDRIV_AGENT_NAME} user=${authData.user.email}`,
+    );
 
     return NextResponse.json({
       token: jwt,
       roomName,
       url: livekitUrl,
+      agentName: SUDRIV_AGENT_NAME,
     });
   } catch (error) {
     console.error("[livekit/token] Failed to generate token:", error);
     return NextResponse.json(
       { error: "Internal server error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

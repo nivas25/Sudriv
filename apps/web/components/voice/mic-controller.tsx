@@ -8,21 +8,22 @@ import {
 import { ConnectionState } from "livekit-client";
 
 /**
- * On connect only: force mic OFF once for push-to-talk.
- * Does not fight the PTT button while the user is holding.
+ * On each successful room connect: force mic OFF once for push-to-talk.
+ * Tracks identity so soft reconnects that keep the same participant don't
+ * thrash the mic while the producer is holding PTT.
  */
 export function MicController() {
   const connectionState = useConnectionState();
   const { localParticipant } = useLocalParticipant();
-  const didInit = useRef(false);
+  const primedFor = useRef<string | null>(null);
 
   useEffect(() => {
     if (connectionState !== ConnectionState.Connected || !localParticipant) {
-      didInit.current = false;
       return;
     }
-    if (didInit.current) return;
-    didInit.current = true;
+    const id = localParticipant.identity || "local";
+    if (primedFor.current === id) return;
+    primedFor.current = id;
 
     void (async () => {
       try {
@@ -33,6 +34,13 @@ export function MicController() {
       }
     })();
   }, [connectionState, localParticipant]);
+
+  // Allow re-prime after a full disconnect so hard recovery gets a clean mic.
+  useEffect(() => {
+    if (connectionState === ConnectionState.Disconnected) {
+      primedFor.current = null;
+    }
+  }, [connectionState]);
 
   return null;
 }

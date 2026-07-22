@@ -22,7 +22,7 @@ from datetime import datetime
 from livekit.agents import llm
 
 from agent.confirmation import ConfirmationGuard
-from agent.session import SessionManager, supabase_client, redis_client
+from agent.session import SessionManager, supabase_client, redis_client, run_sync
 
 logger = logging.getLogger("sudriv-agent.tools")
 
@@ -452,21 +452,23 @@ class SudrivToolkit:
         }
         
         proposal_id = await self.confirmation_guard.create_proposal(proposal)
-        
-        # Also persist to Supabase for audit
+
+        # Persist to Supabase for audit (off event loop — sync client)
         try:
-            supabase = supabase_client()
-            supabase.table("proposals").insert({
-                "id": proposal_id,
-                "session_id": self.session.session_id,
-                "proposal_type": action,
-                "proposed_changes": proposal["proposed_changes"],
-                "impact_analysis": proposal["impact_analysis"],
-                "status": "pending",
-            }).execute()
+            def _persist_proposal() -> None:
+                supabase_client().table("proposals").insert({
+                    "id": proposal_id,
+                    "session_id": self.session.session_id,
+                    "proposal_type": action,
+                    "proposed_changes": proposal["proposed_changes"],
+                    "impact_analysis": proposal["impact_analysis"],
+                    "status": "pending",
+                }).execute()
+
+            await run_sync(_persist_proposal)
         except Exception as e:
             logger.error(f"Failed to persist proposal to Supabase: {e}")
-        
+
         return (
             f"Proposal created (ID: {proposal_id[:8]}). "
             f"Summary: {summary}. "
@@ -532,47 +534,51 @@ class SudrivToolkit:
             
             # Apply to Redis + Supabase
             await self.session.update_running_order(new_ro)
-            
-            supabase = supabase_client()
-            # If a news item was used, mark it
+
             news_item_id = proposal["proposed_changes"].get("news_item_id")
-            if news_item_id:
+            proposal_id = self.confirmation_guard.current_proposal_id
+            producer_response = producer_confirmation
+            session_id = self.session.session_id
+            proposal_type = proposal["proposal_type"]
+            proposal_summary = proposal["summary"]
+            ro_version = new_ro["version"]
+
+            def _post_apply_db() -> None:
+                supabase = supabase_client()
+                if news_item_id:
+                    try:
+                        supabase.table("news_items").update(
+                            {"is_used": True}
+                        ).eq("id", news_item_id).execute()
+                    except Exception as e:
+                        logger.error("Failed to update news item status: %s", e)
                 try:
-                    supabase.table("news_items") \
-                        .update({"is_used": True}) \
-                        .eq("id", news_item_id) \
-                        .execute()
-                except Exception as e:
-                    logger.error(f"Failed to update news item status: {e}")
-            
-            # Update proposal status in Supabase
-            try:
-                supabase.table("proposals") \
-                    .update({
+                    supabase.table("proposals").update({
                         "status": "confirmed",
-                        "producer_response": producer_confirmation,
+                        "producer_response": producer_response,
                         "resolved_at": datetime.utcnow().isoformat(),
-                    }) \
-                    .eq("id", self.confirmation_guard.current_proposal_id) \
-                    .execute()
-            except Exception as e:
-                logger.error(f"Failed to update proposal status in Supabase: {e}")
-            
-            # Log event
+                    }).eq("id", proposal_id).execute()
+                except Exception as e:
+                    logger.error("Failed to update proposal status: %s", e)
+                try:
+                    supabase.table("session_events").insert({
+                        "session_id": session_id,
+                        "event_type": "running_order_updated",
+                        "payload": {
+                            "version": ro_version,
+                            "action": proposal_type,
+                            "summary": proposal_summary,
+                        },
+                        "source": "agent",
+                    }).execute()
+                except Exception as e:
+                    logger.error("Failed to log session event: %s", e)
+
             try:
-                supabase.table("session_events").insert({
-                    "session_id": self.session.session_id,
-                    "event_type": "running_order_updated",
-                    "payload": {
-                        "version": new_ro["version"],
-                        "action": proposal["proposal_type"],
-                        "summary": proposal["summary"],
-                    },
-                    "source": "agent",
-                }).execute()
+                await run_sync(_post_apply_db)
             except Exception as e:
-                logger.error(f"Failed to log session event: {e}")
-            
+                logger.error("Post-apply Supabase work failed: %s", e)
+
             # Mark applied in confirmation guard
             await self.confirmation_guard.mark_applied()
             
@@ -693,90 +699,99 @@ class SudrivToolkit:
                     segment_id = None
 
         try:
-            supabase = supabase_client()
-            result = (
-                supabase.table("anchor_instructions")
-                .insert(
-                    {
-                        "session_id": self.session.session_id,
-                        "segment_id": segment_id,
-                        "instruction_text": instruction_text,
-                        "instruction_type": itype,
-                        "status": "pending",
-                    }
-                )
-                .execute()
-            )
+            session_id = self.session.session_id
+            local_segments = self.session.running_order.get("segments", [])
 
-            instruction_id = result.data[0]["id"] if result.data else "unknown"
-
-            # Also push instruction text onto the segment teleprompter so
-            # Anchor Script panel (which reads segments.teleprompter_text) updates.
-            if segment_id and instruction_text:
-                try:
-                    # Prefer DB segment id from latest RO if local ids were regenerated
-                    ro = (
-                        supabase.table("running_orders")
-                        .select("id")
-                        .eq("session_id", self.session.session_id)
-                        .order("version", desc=True)
-                        .limit(1)
-                        .execute()
+            def _push_instruction() -> tuple[str, Optional[str], Optional[int]]:
+                """Returns (instruction_id, new_teleprompter_text, target_position)."""
+                supabase = supabase_client()
+                result = (
+                    supabase.table("anchor_instructions")
+                    .insert(
+                        {
+                            "session_id": session_id,
+                            "segment_id": segment_id,
+                            "instruction_text": instruction_text,
+                            "instruction_type": itype,
+                            "status": "pending",
+                        }
                     )
-                    if ro.data:
-                        ro_id = ro.data[0]["id"]
-                        # Match by title from local segment if id not in DB
-                        segs_db = (
-                            supabase.table("segments")
-                            .select("id, title, position, teleprompter_text")
-                            .eq("running_order_id", ro_id)
-                            .order("position")
+                    .execute()
+                )
+                instruction_id = result.data[0]["id"] if result.data else "unknown"
+                new_text: Optional[str] = None
+                target_pos: Optional[int] = None
+
+                if segment_id and instruction_text:
+                    try:
+                        ro = (
+                            supabase.table("running_orders")
+                            .select("id")
+                            .eq("session_id", session_id)
+                            .order("version", desc=True)
+                            .limit(1)
                             .execute()
                         )
-                        target = None
-                        for s in segs_db.data or []:
-                            if s["id"] == segment_id:
-                                target = s
-                                break
-                        if not target and segs_db.data:
-                            # Fall back: first pending / first row
-                            target = segs_db.data[0]
-
-                        if target:
-                            prev = (target.get("teleprompter_text") or "").strip()
-                            cue = f"\n\n[ANCHOR CUE]\n{instruction_text}"
-                            new_text = (
-                                f"{prev}{cue}" if prev else f"{target.get('title', '')}{cue}"
+                        if ro.data:
+                            ro_id = ro.data[0]["id"]
+                            segs_db = (
+                                supabase.table("segments")
+                                .select("id, title, position, teleprompter_text")
+                                .eq("running_order_id", ro_id)
+                                .order("position")
+                                .execute()
                             )
-                            supabase.table("segments").update(
-                                {"teleprompter_text": new_text}
-                            ).eq("id", target["id"]).execute()
-
-                            # Keep in-memory RO in sync for subsequent tool calls
-                            for s in self.session.running_order.get("segments", []):
-                                if s.get("position") == target.get("position") or s.get(
-                                    "title"
-                                ) == target.get("title"):
-                                    s["teleprompter_text"] = new_text
+                            target = None
+                            for s in segs_db.data or []:
+                                if s["id"] == segment_id:
+                                    target = s
                                     break
-                except Exception as te:
-                    logger.warning("Could not update segment teleprompter: %s", te)
+                            if not target and segs_db.data:
+                                target = segs_db.data[0]
 
-            try:
-                supabase.table("session_events").insert(
-                    {
-                        "session_id": self.session.session_id,
-                        "event_type": "anchor_instruction_sent",
-                        "payload": {
-                            "instruction_id": instruction_id,
-                            "instruction_type": itype,
-                            "instruction_text": instruction_text,
-                        },
-                        "source": "agent",
-                    }
-                ).execute()
-            except Exception as ee:
-                logger.warning("session_events insert skipped: %s", ee)
+                            if target:
+                                prev = (target.get("teleprompter_text") or "").strip()
+                                cue = f"\n\n[ANCHOR CUE]\n{instruction_text}"
+                                new_text = (
+                                    f"{prev}{cue}"
+                                    if prev
+                                    else f"{target.get('title', '')}{cue}"
+                                )
+                                supabase.table("segments").update(
+                                    {"teleprompter_text": new_text}
+                                ).eq("id", target["id"]).execute()
+                                target_pos = target.get("position")
+                    except Exception as te:
+                        logger.warning("Could not update segment teleprompter: %s", te)
+
+                try:
+                    supabase.table("session_events").insert(
+                        {
+                            "session_id": session_id,
+                            "event_type": "anchor_instruction_sent",
+                            "payload": {
+                                "instruction_id": instruction_id,
+                                "instruction_type": itype,
+                                "instruction_text": instruction_text,
+                            },
+                            "source": "agent",
+                        }
+                    ).execute()
+                except Exception as ee:
+                    logger.warning("session_events insert skipped: %s", ee)
+
+                return instruction_id, new_text, target_pos
+
+            _iid, new_text, target_pos = await run_sync(_push_instruction)
+
+            # Keep in-memory RO in sync (main thread / event loop only)
+            if new_text is not None:
+                for s in local_segments:
+                    if (
+                        target_pos is not None and s.get("position") == target_pos
+                    ) or s.get("id") == segment_id:
+                        s["teleprompter_text"] = new_text
+                        break
 
             return (
                 f"Anchor instruction delivered ({itype}): \"{instruction_text}\". "

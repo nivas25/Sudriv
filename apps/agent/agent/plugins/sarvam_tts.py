@@ -26,9 +26,10 @@ def create_sarvam_tts(
     speech_sample_rate: int = 22050,
     pace: float | None = None,
     temperature: float = 0.35,
-    # Balanced: smooth enough, but short chunks so interrupt cuts audio fast
-    min_buffer_size: int = 40,
-    max_chunk_length: int = 90,
+    # Sarvam plugin enforces min_buffer_size in [30, 200] (default 50).
+    # Use the plugin default — values < 30 crash the entire job at startup.
+    min_buffer_size: int = 50,
+    max_chunk_length: int = 150,
     output_audio_bitrate: str = "128k",
     # PCM avoids MP3 decode glitches in the LiveKit path
     output_audio_codec: str = "linear16",

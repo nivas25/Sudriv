@@ -7,8 +7,11 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# LiveKit Agents health server (WorkerOptions.port / $PORT)
+# LiveKit Agents health server (WorkerOptions.port / $PORT).
+# Cold start: install layers are cached, but process prewarm loads Silero VAD
+# and registers with LiveKit — 30s was too aggressive and caused restarts that
+# re-dispatched jobs and re-greeted mid-session.
 healthcheckPath = "/"
-healthcheckTimeout = 30
+healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
