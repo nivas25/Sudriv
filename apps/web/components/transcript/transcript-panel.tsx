@@ -32,16 +32,15 @@ interface Message {
   timestamp: Date;
 }
 
-/**
- * TranscriptPanel — AI Copilot Feed
- *
- * Outer shell never calls LiveKit hooks until the room provider is ready.
- */
+const MIC_OPTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+} as const;
+
 export function TranscriptPanel({ sessionId }: { sessionId: string }) {
   const ready = useLiveKitReady();
-  if (!ready) {
-    return <TranscriptPanelDisconnected />;
-  }
+  if (!ready) return <TranscriptPanelDisconnected />;
   return <TranscriptPanelConnected sessionId={sessionId} />;
 }
 
@@ -80,79 +79,122 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [micError, setMicError] = useState<string | null>(null);
-  const [micLabel, setMicLabel] = useState<string | null>(null);
+  const [holding, setHolding] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const holdingRef = useRef(false);
+  const pttBusyRef = useRef(false);
 
   const isConnected = connectionState === ConnectionState.Connected;
 
-  const toggleMic = useCallback(async () => {
-    if (!localParticipant) return;
-    setMicError(null);
-    try {
-      const next = !isMicrophoneEnabled;
-      if (next) {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          stream.getTracks().forEach((t) => t.stop());
-        } catch (permErr) {
-          const msg =
-            permErr instanceof DOMException && permErr.name === "NotAllowedError"
-              ? "Allow microphone access in the browser (lock / site settings in the address bar)."
-              : permErr instanceof DOMException && permErr.name === "NotFoundError"
-                ? "No microphone detected. Check Windows Settings → System → Sound → Input."
-                : "Could not access microphone.";
-          setMicError(msg);
-          return;
+  const setMic = useCallback(
+    async (enabled: boolean) => {
+      if (!localParticipant || pttBusyRef.current) return;
+      pttBusyRef.current = true;
+      setMicError(null);
+      try {
+        if (enabled) {
+          // Permission prompt on first press
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+            stream.getTracks().forEach((t) => t.stop());
+          } catch (permErr) {
+            const msg =
+              permErr instanceof DOMException && permErr.name === "NotAllowedError"
+                ? "माइक अनुमति दें (browser address bar → Microphone → Allow)"
+                : permErr instanceof DOMException && permErr.name === "NotFoundError"
+                  ? "कोई माइक्रोफ़ोन नहीं मिला"
+                  : "माइक चालू नहीं हो सका";
+            setMicError(msg);
+            return;
+          }
         }
+
+        await localParticipant.setMicrophoneEnabled(enabled, MIC_OPTS);
+        console.info("[PTT]", enabled ? "mic ON (hold)" : "mic OFF (release)", {
+          sessionId: sessionId.slice(0, 8),
+        });
+      } catch (e) {
+        console.error("[PTT] failed", e);
+        setMicError(e instanceof Error ? e.message : "Mic error");
+      } finally {
+        pttBusyRef.current = false;
       }
+    },
+    [localParticipant, sessionId],
+  );
 
-      await localParticipant.setMicrophoneEnabled(next, {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      });
+  const startPtt = useCallback(
+    (e: React.PointerEvent | React.TouchEvent) => {
+      e.preventDefault();
+      if (!isConnected || holdingRef.current) return;
+      holdingRef.current = true;
+      setHolding(true);
+      void setMic(true);
+    },
+    [isConnected, setMic],
+  );
 
-      const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
-      setMicLabel(pub?.track?.mediaStreamTrack?.label ?? null);
-      console.log("[TranscriptPanel] Mic toggled", {
-        enabled: next,
-        label: pub?.track?.mediaStreamTrack?.label,
-        sessionId,
-      });
-    } catch (e) {
-      console.error("[TranscriptPanel] Failed to toggle mic:", e);
-      setMicError(e instanceof Error ? e.message : "Failed to toggle microphone");
-    }
-  }, [localParticipant, isMicrophoneEnabled, sessionId]);
+  const endPtt = useCallback(
+    (e?: React.PointerEvent | React.TouchEvent) => {
+      e?.preventDefault();
+      if (!holdingRef.current) return;
+      holdingRef.current = false;
+      setHolding(false);
+      void setMic(false);
+    },
+    [setMic],
+  );
 
+  // Safety: release on window blur / pointer cancel
   useEffect(() => {
-    if (!localParticipant || !isMicrophoneEnabled) return;
-    const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
-    setMicLabel(pub?.track?.mediaStreamTrack?.label ?? null);
-  }, [localParticipant, isMicrophoneEnabled]);
+    const release = () => {
+      if (holdingRef.current) {
+        holdingRef.current = false;
+        setHolding(false);
+        void setMic(false);
+      }
+    };
+    window.addEventListener("blur", release);
+    window.addEventListener("pointerup", release);
+    return () => {
+      window.removeEventListener("blur", release);
+      window.removeEventListener("pointerup", release);
+    };
+  }, [setMic]);
+
+  // Transcripts: only accept producer text while PTT is held (or just released within 1.5s)
+  const lastPttEndRef = useRef(0);
+  useEffect(() => {
+    if (!holding) lastPttEndRef.current = Date.now();
+  }, [holding]);
 
   useEffect(() => {
     if (!room) return;
 
-    /**
-     * Coalesce streaming STT finals into one bubble per speaker turn.
-     * Without this, each final fragment becomes a separate chat message.
-     */
     const handleTranscription = (
       segments: TranscriptionSegment[],
       participant: { identity?: string } | undefined,
     ) => {
       for (const segment of segments) {
-        // Skip empty / pure interim noise. Prefer final; allow non-final only
-        // to update the last same-role bubble (live typing feel).
         const text = segment.text?.trim();
-        if (!text) continue;
+        if (!text || !segment.final) continue;
 
-        const isProducer = Boolean(participant?.identity?.startsWith("producer"));
+        const isProducer = Boolean(
+          participant?.identity?.startsWith("producer"),
+        );
         const role: "human" | "ai" = isProducer ? "human" : "ai";
 
-        // Ignore agent interim fragments — agent TTS captions often spam.
-        if (role === "ai" && !segment.final) continue;
+        // Block producer ghost transcripts when mic is not held
+        if (role === "human") {
+          const recentHold =
+            holdingRef.current || Date.now() - lastPttEndRef.current < 1500;
+          if (!recentHold) {
+            console.info("[Transcript] ignored (mic not held)", text.slice(0, 40));
+            continue;
+          }
+        }
 
         setMessages((prev) => {
           const byId = prev.findIndex((m) => m.id === segment.id);
@@ -169,32 +211,26 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
             Date.now() - last.timestamp.getTime() < 8000;
 
           if (sameTurn) {
-            // Prefer longer replacement (STT often rewrites the whole phrase),
-            // otherwise append unique tails.
             let nextText = text;
-            if (text.startsWith(last.text)) {
-              nextText = text;
-            } else if (last.text.startsWith(text)) {
-              nextText = last.text;
-            } else if (!last.text.includes(text)) {
+            if (text.startsWith(last.text)) nextText = text;
+            else if (last.text.startsWith(text)) nextText = last.text;
+            else if (!last.text.includes(text))
               nextText = `${last.text} ${text}`.replace(/\s+/g, " ").trim();
-            } else {
-              nextText = last.text;
-            }
+            else nextText = last.text;
             return [
               ...prev.slice(0, -1),
-              { ...last, id: segment.id, text: nextText, timestamp: new Date() },
+              {
+                ...last,
+                id: segment.id,
+                text: nextText,
+                timestamp: new Date(),
+              },
             ];
           }
 
           return [
             ...prev,
-            {
-              id: segment.id,
-              role,
-              text,
-              timestamp: new Date(),
-            },
+            { id: segment.id, role, text, timestamp: new Date() },
           ];
         });
       }
@@ -207,21 +243,15 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
   }, [room]);
 
   useEffect(() => {
-    if (agentState) {
-      console.log("[TranscriptPanel] Agent state:", agentState);
-    }
-  }, [agentState]);
-
-  useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
 
   const statusColor = isConnected
-    ? isMicrophoneEnabled
+    ? holding || isMicrophoneEnabled
       ? "bg-emerald-600"
-      : "bg-amber-500"
+      : "bg-gray-500"
     : connectionState === ConnectionState.Connecting
       ? "bg-amber-500"
       : "bg-gray-400";
@@ -230,9 +260,9 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
     ? connectionState === ConnectionState.Connecting
       ? "Connecting…"
       : "Disconnected"
-    : isMicrophoneEnabled
-      ? "Mic on"
-      : "Mic muted";
+    : holding
+      ? "Push-to-talk"
+      : "Hold mic to talk";
 
   const agentLabel =
     agentState === "listening"
@@ -241,12 +271,10 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
         ? "Agent thinking"
         : agentState === "speaking"
           ? "Agent speaking"
-          : agentState === "connecting"
-            ? "Agent connecting"
-            : "Agent idle";
+          : "Agent idle";
 
   return (
-    <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden">
+    <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden select-none">
       <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 bg-white">
         <div className="flex items-center gap-3">
           <MessageSquare className="w-5 h-5 text-gray-400" />
@@ -286,7 +314,7 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
               <>
                 <Loader2 className="w-8 h-8 text-gray-300 animate-spin" />
                 <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">
-                  Connecting to AI agent…
+                  Connecting…
                 </p>
               </>
             ) : (
@@ -301,16 +329,11 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 gap-3 px-6 text-center">
             <p className="text-sm font-bold text-gray-500 uppercase tracking-widest">
-              {isMicrophoneEnabled
-                ? "Mic is on — speak to the agent"
-                : "Turn the mic on, then speak"}
+              Press & hold mic to speak
             </p>
-            {micLabel && (
-              <p className="text-xs text-gray-400">Using: {micLabel}</p>
-            )}
             <p className="text-xs text-gray-400 max-w-sm leading-relaxed">
-              If the agent still cannot hear you: allow microphone for this site
-              in the browser, and check Windows Settings → System → Sound → Input.
+              माइक बटन दबाकर रखें, बोलें, छोड़ दें। माइक हमेशा बंद रहता है जब तक
+              आप दबाते नहीं।
             </p>
           </div>
         ) : (
@@ -339,7 +362,6 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
                     )}
                   </div>
                 </div>
-
                 <div
                   className={`flex flex-col ${
                     msg.role === "human" ? "items-end" : "items-start"
@@ -364,43 +386,46 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
         )}
       </div>
 
+      {/* Push-to-talk control */}
       <div className="p-4 sm:p-6 bg-white border-t border-gray-100 flex flex-col items-center justify-center gap-3">
         <button
-          onClick={toggleMic}
+          type="button"
           disabled={!isConnected}
-          aria-pressed={isMicrophoneEnabled}
-          aria-label={isMicrophoneEnabled ? "Mute microphone" : "Unmute microphone"}
-          className={`flex items-center justify-center w-16 h-16 rounded-full shadow-lg transition-all duration-300 active:scale-95 relative ${
+          onPointerDown={startPtt}
+          onPointerUp={endPtt}
+          onPointerLeave={endPtt}
+          onPointerCancel={endPtt}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ touchAction: "none" }}
+          aria-pressed={holding}
+          aria-label="Hold to talk"
+          className={`flex items-center justify-center w-20 h-20 rounded-full shadow-lg transition-all relative touch-none ${
             !isConnected
               ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-              : isMicrophoneEnabled
-                ? "bg-emerald-600 text-white shadow-emerald-600/30"
-                : "bg-gray-900 text-white hover:scale-105 hover:bg-gray-800"
+              : holding
+                ? "bg-emerald-600 text-white shadow-emerald-600/40 scale-110"
+                : "bg-gray-900 text-white hover:bg-gray-800"
           }`}
         >
-          {isMicrophoneEnabled && (
-            <div className="absolute inset-0 rounded-full border-2 border-emerald-400 animate-ping opacity-40" />
+          {holding && (
+            <div className="absolute inset-0 rounded-full border-2 border-emerald-300 animate-ping opacity-50" />
           )}
-          {isMicrophoneEnabled ? (
-            <Mic className="w-6 h-6" />
-          ) : (
-            <MicOff className="w-6 h-6" />
-          )}
+          {holding ? <Mic className="w-7 h-7" /> : <MicOff className="w-7 h-7" />}
         </button>
         <span
-          className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${
+          className={`text-[10px] font-bold uppercase tracking-widest ${
             !isConnected
               ? "text-gray-300"
-              : isMicrophoneEnabled
+              : holding
                 ? "text-emerald-600 animate-pulse"
                 : "text-gray-400"
           }`}
         >
           {!isConnected
             ? "Not connected"
-            : isMicrophoneEnabled
-              ? "Listening — speak now"
-              : "Mic off — tap to speak"}
+            : holding
+              ? "Listening — release when done"
+              : "Hold to talk · Push-to-talk"}
         </span>
       </div>
     </div>

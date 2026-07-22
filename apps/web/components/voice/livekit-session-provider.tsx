@@ -21,12 +21,9 @@ export function useLiveKitReady() {
 }
 
 /**
- * LiveKitSessionProvider — Wraps the session page in a LiveKit room connection.
- *
- * 1. Fetches a token from /api/livekit/token
- * 2. Connects to the LiveKit room
- * 3. Forces microphone publish so the agent can hear the producer
- * 4. Renders agent audio via RoomAudioRenderer
+ * LiveKit room wrapper.
+ * audio={false}: push-to-talk only — mic stays off until user holds PTT.
+ * RoomAudioRenderer volume reduced so agent TTS is less harsh.
  */
 export function LiveKitSessionProvider({
   sessionId,
@@ -67,16 +64,16 @@ export function LiveKitSessionProvider({
         setToken(data.token);
         setUrl(data.url);
         setRoomName(data.roomName ?? null);
-        console.log("[LiveKit] Token received for room:", data.roomName);
+        console.info("[LiveKit] token ok room=", data.roomName);
       } catch (e) {
-        console.error("[LiveKit] Token fetch failed:", e);
+        console.error("[LiveKit] token fetch failed", e);
         if (!cancelled) {
           setError("Failed to connect to voice service");
         }
       }
     };
 
-    fetchToken();
+    void fetchToken();
     return () => {
       cancelled = true;
     };
@@ -86,9 +83,6 @@ export function LiveKitSessionProvider({
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 p-6">
         <p className="text-red-500 text-sm font-medium">Voice Error: {error}</p>
-        <p className="text-xs text-muted-foreground">
-          Check LIVEKIT_API_KEY / LIVEKIT_API_SECRET / NEXT_PUBLIC_LIVEKIT_URL
-        </p>
       </div>
     );
   }
@@ -106,28 +100,26 @@ export function LiveKitSessionProvider({
       serverUrl={url}
       token={token}
       connect={true}
-      audio={{
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      }}
+      // Critical: do NOT auto-publish mic (push-to-talk)
+      audio={false}
       video={false}
       connectOptions={{
         autoSubscribe: true,
       }}
       onDisconnected={(reason) => {
-        console.log("[LiveKit] Disconnected from room", reason);
+        console.info("[LiveKit] disconnected", reason);
       }}
       onConnected={() => {
-        console.log("[LiveKit] Connected to room", roomName);
+        console.info("[LiveKit] connected", roomName);
       }}
       onError={(e) => {
-        console.error("[LiveKit] Room error:", e);
+        console.error("[LiveKit] room error", e);
       }}
       className="h-full"
     >
       <LiveKitReadyContext.Provider value={true}>
-        <RoomAudioRenderer />
+        {/* Slightly quieter agent playback */}
+        <RoomAudioRenderer volume={0.65} />
         <MicController />
         {children}
       </LiveKitReadyContext.Provider>

@@ -33,10 +33,16 @@ def redis_client() -> Redis:
 def supabase_client() -> Client:
     global _supabase_instance
     if _supabase_instance is None:
-        _supabase_instance = create_client(
-            os.environ["SUPABASE_URL"],
-            os.environ["SUPABASE_SERVICE_KEY"],
+        url = os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
+        key = (
+            os.environ.get("SUPABASE_SERVICE_KEY")
+            or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         )
+        if not url or not key:
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_SERVICE_KEY (or SUPABASE_SERVICE_ROLE_KEY) required"
+            )
+        _supabase_instance = create_client(url, key)
     return _supabase_instance
 
 
@@ -292,87 +298,79 @@ class SessionManager:
         )
 
     def build_greeting(self) -> str:
-        """Build a contextual greeting based on the loaded session."""
-        segments = self.running_order.get("segments", [])
-        total_mins = self.running_order.get("total_duration_seconds", 0) // 60
-        news_count = len(self.available_news_items)
-
-        if not segments:
-            return (
-                "Namaste! I'm your Sudriv co-pilot. "
-                "It looks like the session is being set up. "
-                "I'll be ready once the running order is loaded."
-            )
-
-        return (
-            f"Hi — Sudriv co-pilot here. "
-            f"Running order is loaded: {len(segments)} segments, "
-            f"{total_mins} minutes, {news_count} news items ready. "
-            f"What would you like to do first?"
-        )
+        """Short natural Hindi opener — no segment dumps."""
+        return "नमस्ते, मैं सुद्रिव हूँ। तैयार हूँ, बताइए क्या करना है।"
 
     async def update_running_order(self, new_order: dict[str, Any]) -> None:
         """
-        Update the running order in cache and persist to database.
+        Update running order in Redis + Supabase.
+
+        Awaits DB write so the frontend poll/Refresh sees new segments immediately
+        after the tool returns (not fire-and-forget).
         """
+        import asyncio
+
         self.running_order = new_order
         version = new_order.get("version", 1)
-        logger.info(f"Running order updated to version {version}")
-        
-        # 1. Write to Redis immediately
+        total_dur = new_order.get("total_duration_seconds", 0)
+        logger.info("Running order → v%s (%d segs)", version, len(new_order.get("segments", [])))
+
         try:
             redis = redis_client()
             await redis.set(f"running_order:{self.session_id}", json.dumps(new_order))
         except Exception as e:
-            logger.error(f"Failed to update running order in Redis: {e}")
+            logger.error("Failed to update running order in Redis: %s", e)
 
-        # 2. Persist to Supabase asynchronously
-        def _update_db():
-            try:
-                supabase = supabase_client()
-                # Assuming running_order has an 'id' or we update by session_id
-                supabase.table("running_orders").update(
-                    {"version": version, "total_duration_seconds": new_order.get("total_duration_seconds", 0)}
-                ).eq("session_id", self.session_id).execute()
-                
-                # Fetch running order id to update segments
-                ro_result = supabase.table("running_orders").select("id").eq("session_id", self.session_id).execute()
-                if not ro_result.data:
-                    return
-                ro_id = ro_result.data[0]["id"]
-                
-                # Delete old segments then insert full new set (fires realtime INSERT).
-                supabase.table("segments").delete().eq("running_order_id", ro_id).execute()
+        def _update_db() -> int:
+            supabase = supabase_client()
+            # Latest RO for this session
+            ro_result = (
+                supabase.table("running_orders")
+                .select("id, version")
+                .eq("session_id", self.session_id)
+                .order("version", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if not ro_result.data:
+                raise RuntimeError(f"No running_orders row for session {self.session_id}")
 
-                segments = new_order.get("segments", [])
-                if segments:
-                    inserts = []
-                    for seg in segments:
-                        inserts.append({
-                            "running_order_id": ro_id,
-                            "position": seg["position"],
-                            "title": seg["title"],
-                            "slug": seg.get("slug", f"seg-{seg['position']}"),
-                            "segment_type": seg.get("segment_type", "package"),
-                            "duration_seconds": seg["duration_seconds"],
-                            "start_offset_seconds": seg.get("start_offset_seconds", 0),
-                            "teleprompter_text": seg.get("teleprompter_text", ""),
-                            "status": seg.get("status", "pending"),
-                            "news_item_id": seg.get("news_item_id"),
-                        })
-                    supabase.table("segments").insert(inserts).execute()
-                # Touch running_orders so UPDATE realtime subscribers refresh.
-                supabase.table("running_orders").update(
-                    {
-                        "version": version,
-                        "total_duration_seconds": new_order.get("total_duration_seconds", 0),
+            ro_id = ro_result.data[0]["id"]
+            supabase.table("running_orders").update(
+                {"version": version, "total_duration_seconds": total_dur}
+            ).eq("id", ro_id).execute()
+
+            supabase.table("segments").delete().eq("running_order_id", ro_id).execute()
+
+            segments = new_order.get("segments", [])
+            if segments:
+                inserts = []
+                for seg in segments:
+                    row = {
+                        "running_order_id": ro_id,
+                        "position": seg["position"],
+                        "title": seg["title"],
+                        "slug": seg.get("slug", f"seg-{seg['position']}"),
+                        "segment_type": seg.get("segment_type", "package"),
+                        "duration_seconds": seg["duration_seconds"],
+                        "start_offset_seconds": seg.get("start_offset_seconds", 0),
+                        "teleprompter_text": seg.get("teleprompter_text")
+                        or f"{seg['title']}\n\n(स्क्रिप्ट उपलब्ध नहीं।)",
+                        "status": seg.get("status", "pending"),
                     }
-                ).eq("id", ro_id).execute()
-            except Exception as e:
-                logger.error(f"Failed to update running order in Supabase: {e}")
-                
-        import asyncio
-        asyncio.create_task(asyncio.to_thread(_update_db))
+                    nid = seg.get("news_item_id")
+                    if nid:
+                        row["news_item_id"] = nid
+                    inserts.append(row)
+                supabase.table("segments").insert(inserts).execute()
+
+            return len(segments)
+
+        try:
+            n = await asyncio.to_thread(_update_db)
+            logger.info("Supabase RO synced v%s segs=%d session=%s", version, n, self.session_id)
+        except Exception as e:
+            logger.error("Failed to update running order in Supabase: %s", e)
 
     async def set_pending_proposal(self, proposal: dict[str, Any]) -> None:
         """Store the current pending proposal."""

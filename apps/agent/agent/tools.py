@@ -26,9 +26,51 @@ from agent.session import SessionManager, supabase_client, redis_client
 
 logger = logging.getLogger("sudriv-agent.tools")
 
+# Must match DB: valid_instruction_type CHECK
+VALID_INSTRUCTION_TYPES = frozenset(
+    {"transition", "breaking", "correction", "timing", "general"}
+)
+
+# Map common LLM mistakes → allowed values
+_INSTRUCTION_TYPE_ALIASES = {
+    "segment": "general",
+    "segments": "general",
+    "update": "general",
+    "insert": "transition",
+    "remove": "transition",
+    "reorder": "transition",
+    "news": "breaking",
+    "breaking_news": "breaking",
+    "break": "breaking",
+    "fix": "correction",
+    "time": "timing",
+    "delay": "timing",
+    "cue": "transition",
+    "intro": "transition",
+    "outro": "transition",
+    "other": "general",
+    "info": "general",
+    "instruction": "general",
+}
+
 
 def slugify(text: str) -> str:
     return text.lower().replace(" ", "-")
+
+
+def normalize_instruction_type(raw: str | None) -> str:
+    """Coerce LLM-provided type into a DB-allowed value."""
+    if not raw:
+        return "transition"
+    key = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
+    if key in VALID_INSTRUCTION_TYPES:
+        return key
+    mapped = _INSTRUCTION_TYPE_ALIASES.get(key)
+    if mapped:
+        logger.info("instruction_type %r → %r", raw, mapped)
+        return mapped
+    logger.warning("Unknown instruction_type %r — using 'general'", raw)
+    return "general"
 
 
 class SudrivToolkit:
@@ -156,7 +198,13 @@ class SudrivToolkit:
                 "start_offset_seconds": 0,  # Will be recalculated
                 "status": "pending",
                 "news_item_id": news_item_id,
-                "teleprompter_text": "",
+                # Anchor Script panel reads this field — never leave blank
+                "teleprompter_text": (
+                    f"{new_title}\n\n"
+                    f"[LIVE]\n"
+                    f"यह {new_title} सेगमेंट है। "
+                    f"एंकर यहाँ से पढ़ना शुरू करें।"
+                ),
             }
             
             # Shift all segments at and after target_position
@@ -599,50 +647,142 @@ class SudrivToolkit:
     )
     async def push_anchor_instruction(
         self,
-        instruction_text: Annotated[str, "The clean instruction text for the anchor. Must be concise and actionable."],
-        instruction_type: Annotated[str, "Type: 'transition', 'breaking', 'correction', 'timing', 'general'"] = "transition",
-        segment_id: Annotated[Optional[str], "The UUID of the related segment, if applicable. Must be a valid UUID string."] = None,
+        instruction_text: Annotated[
+            str,
+            "The clean instruction text for the anchor. Must be concise and actionable.",
+        ],
+        instruction_type: Annotated[
+            str,
+            "ONLY one of: transition | breaking | correction | timing | general. "
+            "Never use values like 'segment' or 'update'.",
+        ] = "transition",
+        segment_id: Annotated[
+            Optional[str],
+            "The UUID of the related segment, if applicable. Must be a valid UUID string.",
+        ] = None,
     ) -> str:
-        """Generate and store an anchor instruction."""
-        
+        """Generate and store an anchor instruction + update segment teleprompter if possible."""
+
+        itype = normalize_instruction_type(instruction_type)
+
         # Validate segment_id is a UUID
         if segment_id:
-            import uuid
             try:
                 uuid.UUID(segment_id)
             except ValueError:
-                logger.warning(f"Invalid UUID provided for segment_id: {segment_id}. Defaulting to None.")
+                logger.warning(
+                    "Invalid UUID for segment_id: %s — clearing", segment_id
+                )
                 segment_id = None
+
+        # If no segment_id, attach to first pending / first segment in local RO
+        if not segment_id:
+            segs = sorted(
+                self.session.running_order.get("segments", []),
+                key=lambda s: s.get("position", 0),
+            )
+            pick = next(
+                (s for s in segs if s.get("status") in ("on_air", "pending")),
+                segs[0] if segs else None,
+            )
+            if pick and pick.get("id"):
+                try:
+                    uuid.UUID(str(pick["id"]))
+                    segment_id = str(pick["id"])
+                except ValueError:
+                    segment_id = None
 
         try:
             supabase = supabase_client()
-            result = supabase.table("anchor_instructions").insert({
-                "session_id": self.session.session_id,
-                "segment_id": segment_id,
-                "instruction_text": instruction_text,
-                "instruction_type": instruction_type,
-                "status": "pending",
-            }).execute()
-            
-            instruction_id = result.data[0]["id"] if result.data else "unknown"
-            
-            # Log event
-            supabase.table("session_events").insert({
-                "session_id": self.session.session_id,
-                "event_type": "anchor_instruction_sent",
-                "payload": {
-                    "instruction_id": instruction_id,
-                    "instruction_type": instruction_type,
-                    "instruction_text": instruction_text,
-                },
-                "source": "agent",
-            }).execute()
-            
-            return (
-                f"Anchor instruction delivered: \"{instruction_text}\". "
-                f"The anchor's teleprompter and instruction panel are updated."
+            result = (
+                supabase.table("anchor_instructions")
+                .insert(
+                    {
+                        "session_id": self.session.session_id,
+                        "segment_id": segment_id,
+                        "instruction_text": instruction_text,
+                        "instruction_type": itype,
+                        "status": "pending",
+                    }
+                )
+                .execute()
             )
-        
+
+            instruction_id = result.data[0]["id"] if result.data else "unknown"
+
+            # Also push instruction text onto the segment teleprompter so
+            # Anchor Script panel (which reads segments.teleprompter_text) updates.
+            if segment_id and instruction_text:
+                try:
+                    # Prefer DB segment id from latest RO if local ids were regenerated
+                    ro = (
+                        supabase.table("running_orders")
+                        .select("id")
+                        .eq("session_id", self.session.session_id)
+                        .order("version", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+                    if ro.data:
+                        ro_id = ro.data[0]["id"]
+                        # Match by title from local segment if id not in DB
+                        segs_db = (
+                            supabase.table("segments")
+                            .select("id, title, position, teleprompter_text")
+                            .eq("running_order_id", ro_id)
+                            .order("position")
+                            .execute()
+                        )
+                        target = None
+                        for s in segs_db.data or []:
+                            if s["id"] == segment_id:
+                                target = s
+                                break
+                        if not target and segs_db.data:
+                            # Fall back: first pending / first row
+                            target = segs_db.data[0]
+
+                        if target:
+                            prev = (target.get("teleprompter_text") or "").strip()
+                            cue = f"\n\n[ANCHOR CUE]\n{instruction_text}"
+                            new_text = (
+                                f"{prev}{cue}" if prev else f"{target.get('title', '')}{cue}"
+                            )
+                            supabase.table("segments").update(
+                                {"teleprompter_text": new_text}
+                            ).eq("id", target["id"]).execute()
+
+                            # Keep in-memory RO in sync for subsequent tool calls
+                            for s in self.session.running_order.get("segments", []):
+                                if s.get("position") == target.get("position") or s.get(
+                                    "title"
+                                ) == target.get("title"):
+                                    s["teleprompter_text"] = new_text
+                                    break
+                except Exception as te:
+                    logger.warning("Could not update segment teleprompter: %s", te)
+
+            try:
+                supabase.table("session_events").insert(
+                    {
+                        "session_id": self.session.session_id,
+                        "event_type": "anchor_instruction_sent",
+                        "payload": {
+                            "instruction_id": instruction_id,
+                            "instruction_type": itype,
+                            "instruction_text": instruction_text,
+                        },
+                        "source": "agent",
+                    }
+                ).execute()
+            except Exception as ee:
+                logger.warning("session_events insert skipped: %s", ee)
+
+            return (
+                f"Anchor instruction delivered ({itype}): \"{instruction_text}\". "
+                f"Teleprompter/script panel will refresh."
+            )
+
         except Exception as e:
-            logger.error(f"Failed to push anchor instruction: {e}")
+            logger.error("Failed to push anchor instruction: %s", e)
             return f"ERROR: Failed to deliver anchor instruction: {str(e)}"
