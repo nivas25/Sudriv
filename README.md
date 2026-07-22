@@ -27,7 +27,10 @@
   <a href="#-architecture">Architecture</a> ·
   <a href="#-setup-guide-a-to-z">Setup</a> ·
   <a href="#-deployment">Deploy</a> ·
+  <a href="#-testing">Testing</a> ·
   <a href="./DEPLOY.md">DEPLOY.md</a> ·
+  <a href="./TESTING.md">TESTING.md</a> ·
+  <a href="./docs/DECISIONS.md">Decisions</a> ·
   <a href="./knowledge-base/">Knowledge Base</a>
 </p>
 
@@ -44,9 +47,11 @@
 7. [Setup Guide (A to Z)](#-setup-guide-a-to-z)
 8. [Deployment](#-deployment)
 9. [How to Use](#-how-to-use)
-10. [Security Notes](#-security-notes)
-11. [Future Improvements](#-future-improvements)
-12. [Team & License](#-team--license)
+10. [Testing](#-testing)
+11. [Security Notes](#-security-notes)
+12. [Future Improvements](#-future-improvements)
+13. [Documentation Map](#-documentation-map)
+14. [Team & License](#-team--license)
 
 ---
 
@@ -646,6 +651,28 @@ Detailed steps live in **[DEPLOY.md](./DEPLOY.md)**. Summary:
 
 ---
 
+## Testing
+
+We verify Sudriv with **manual integration tests** against real LiveKit / Supabase / AI providers (not a full automated voice E2E suite).
+
+| Area | Result |
+|------|--------|
+| Login + create session | ✅ |
+| LiveKit join + agent join | ✅ |
+| Push-to-talk voice conversation | ✅ |
+| Interruption (barge-in) | ✅ |
+| Timeline load + post-apply update | ✅ |
+| Anchor script / teleprompter update | ✅ |
+| Tool path propose → confirm → apply | ✅ |
+| `pnpm build` (web) | ✅ |
+| Railway agent image build | ✅ |
+
+**Honest limits:** no automated voice E2E; UI sync relies on poll + Refresh; current demo config is Hindi-primary.
+
+Full matrix, smoke scripts, and fixed failure modes: **[TESTING.md](./TESTING.md)**.
+
+---
+
 ## How to Use
 
 ### Producer journey
@@ -702,6 +729,20 @@ Detailed steps live in **[DEPLOY.md](./DEPLOY.md)**. Summary:
 | **Collaborative PCR** | Multi-producer rooms with role permissions |
 
 Longer roadmap notes: `knowledge-base/12-future-roadmap.md`.
+
+---
+
+## Documentation Map
+
+| Doc | Purpose |
+|-----|---------|
+| [README.md](./README.md) | Product + Voice AI overview (this file) |
+| [DEPLOY.md](./DEPLOY.md) | Vercel + Railway deployment |
+| [TESTING.md](./TESTING.md) | What was tested and how to re-run smoke tests |
+| [docs/DECISIONS.md](./docs/DECISIONS.md) | Key architecture decisions |
+| [knowledge-base/](./knowledge-base/) | Deep product, data model, and pipeline design |
+| [apps/agent/README.md](./apps/agent/README.md) | Agent-only run notes |
+| `.env.example` / `apps/*/.env.example` | Env templates (no secrets) |
 
 ---
 
