@@ -17,30 +17,41 @@ export function TeleprompterPanel({ sessionId }: { sessionId: string }) {
     }
 
     const loadActiveSegment = async () => {
-      // Find on_air segment first
+      // 1. Fetch running order ID first
+      const { data: roData } = await supabase
+        .from("running_orders")
+        .select("id")
+        .eq("session_id", sessionId)
+        .order("version", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!roData?.id) {
+        setTitle("No active segment");
+        setScript("Waiting for segments...");
+        setLoading(false);
+        return;
+      }
+
+      // 2. Find on_air segment
       let { data: segment } = await supabase
         .from("segments")
         .select("*")
-        .eq("running_order_id", (
-           // subquery to get running order for session
-           await supabase.from("running_orders").select("id").eq("session_id", sessionId).order("version", { ascending: false }).limit(1).single()
-        ).data?.id || "")
+        .eq("running_order_id", roData.id)
         .eq("status", "on_air")
         .limit(1)
-        .single();
+        .maybeSingle();
         
       if (!segment) {
-        // Fallback to first pending segment
+        // 3. Fallback to first pending segment
         const { data: pendingData } = await supabase
           .from("segments")
           .select("*")
-          .eq("running_order_id", (
-             await supabase.from("running_orders").select("id").eq("session_id", sessionId).order("version", { ascending: false }).limit(1).single()
-          ).data?.id || "")
+          .eq("running_order_id", roData.id)
           .eq("status", "pending")
           .order("position", { ascending: true })
           .limit(1)
-          .single();
+          .maybeSingle();
         segment = pendingData;
       }
 

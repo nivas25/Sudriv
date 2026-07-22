@@ -25,7 +25,7 @@ export function useRunningOrder(sessionId: string) {
         .eq("session_id", sessionId)
         .order("version", { ascending: false })
         .limit(1)
-        .single();
+        .maybeSingle();
 
       if (ro) {
         setSegments(ro.segments.sort((a: any, b: any) => a.position - b.position));

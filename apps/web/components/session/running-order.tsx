@@ -47,7 +47,7 @@ export function RunningOrder() {
         .select("*")
         .eq("is_active", true)
         .limit(1)
-        .single();
+        .maybeSingle();
         
       if (data && data.default_segments) {
         setTemplateId(data.id);
@@ -101,7 +101,7 @@ export function RunningOrder() {
       .from("timelines_library")
       .select("default_segments")
       .eq("id", templateId)
-      .single();
+      .maybeSingle();
 
     if (template) {
       const updatedSegments = (template.default_segments as TemplateSegment[]).map((s) => {

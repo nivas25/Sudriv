@@ -1,75 +1,163 @@
 """
 Sudriv Voice Agent — Entry Point
 
-LiveKit Agents worker that connects to rooms and runs the voice co-pilot.
+LiveKit Agents 1.6.x worker: one AgentSession per production room.
 
 Usage:
-    uv run python main.py dev       # Development mode (auto-reload)
-    uv run python main.py start     # Production mode
+    uv run python main.py dev
+    uv run python main.py start
 
 See: knowledge-base/05-voice-agent-design.md
 """
 
+from __future__ import annotations
+
+import asyncio
 import logging
 
 from dotenv import load_dotenv
-from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli
+from livekit.agents import (
+    AutoSubscribe,
+    EndpointingOptions,
+    JobContext,
+    JobProcess,
+    TurnHandlingOptions,
+    WorkerOptions,
+    cli,
+)
+from livekit.agents.voice import Agent, AgentSession
+from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
+from livekit.agents.voice.turn import InterruptionOptions, PreemptiveGenerationOptions
+from livekit.plugins import silero
 
-from agent.pipeline import build_voice_agent
+from agent.pipeline import PIPELINE_SAMPLE_RATE, build_voice_pipeline
 from agent.session import SessionManager
 
-# Load environment variables
 load_dotenv()
 
 logger = logging.getLogger("sudriv-agent")
 
 
-async def entrypoint(ctx: JobContext):
+async def entrypoint(ctx: JobContext) -> None:
     """
-    Called when a new LiveKit room is created.
-    One agent instance per production session.
-
-    Flow:
-    1. Connect to the room (audio only)
-    2. Wait for the producer participant
-    3. Initialize session state from room metadata
-    4. Build and start the voice pipeline agent
-    5. Deliver greeting
+    Job lifecycle:
+      connect (audio) → wait for producer → load session →
+      start AgentSession (STT/LLM/TTS on session) → greet → converse
     """
-    logger.info(f"Agent joining room: {ctx.room.name}")
+    logger.info("Agent joining room: %s", ctx.room.name)
 
-    # Connect to the room — only subscribe to audio
+    # AUDIO_ONLY: Room connects with auto_subscribe=False then subscribes to
+    # remote audio publications (see livekit.agents.job._apply_auto_subscribe_opts).
+    # Without this, RoomIO never gets mic frames and STT is deaf.
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
-    # Wait for the producer to join
     participant = await ctx.wait_for_participant()
-    logger.info(f"Producer joined: {participant.identity}")
+    logger.info(
+        "Producer joined identity=%s kind=%s pubs=%s",
+        participant.identity,
+        participant.kind,
+        [
+            (p.sid, p.kind, p.source, p.subscribed)
+            for p in participant.track_publications.values()
+        ],
+    )
 
-    # Initialize session from room metadata
-    session = await SessionManager.from_room(ctx.room)
-    logger.info(f"Session initialized: {session.session_id}")
+    session_mgr = await SessionManager.from_room(ctx.room)
+    logger.info("Session initialized: %s", session_mgr.session_id)
 
-    # Build the voice pipeline agent
-    agent = await build_voice_agent(session)
+    pipeline = build_voice_pipeline(session_mgr)
 
-    # Start the agent
-    agent.start(ctx.room, participant)
+    # Canonical 1.6 pattern: models live on AgentSession; Agent holds
+    # instructions + tools (+ turn-handling). Empty AgentSession() is wrong.
+    agent_session = AgentSession(
+        vad=ctx.proc.userdata["vad"],
+        stt=pipeline.stt,
+        llm=pipeline.llm,
+        tts=pipeline.tts,
+        # PCR-oriented turn handling (KB: ~0.5s endpointing, interruptible)
+        turn_handling=TurnHandlingOptions(
+            endpointing=EndpointingOptions(min_delay=0.4),
+            interruption=InterruptionOptions(
+                enabled=True,
+                min_duration=0.4,
+                min_words=1,
+            ),
+            preemptive_generation=PreemptiveGenerationOptions(enabled=True),
+        ),
+    )
 
-    # Deliver contextual greeting
-    greeting = session.build_greeting()
-    logger.info(f"Greeting: {greeting}")
-    await agent.say(greeting)
+    agent = Agent(
+        instructions=pipeline.instructions,
+        tools=pipeline.tools,
+    )
+
+    @agent_session.on("user_input_transcribed")
+    def _on_stt(ev) -> None:
+        logger.info(
+            "STT final=%s text=%r lang=%s",
+            ev.is_final,
+            ev.transcript,
+            getattr(ev, "language", None),
+        )
+
+    @agent_session.on("conversation_item_added")
+    def _on_item_added(_ev) -> None:
+        try:
+            asyncio.create_task(session_mgr.sync_context_to_redis(agent.chat_ctx))
+        except Exception:
+            logger.exception("Failed to schedule chat context sync")
+
+    @agent_session.on("error")
+    def _on_error(ev) -> None:
+        # Surface STT/LLM/TTS failures that would otherwise look like "deaf agent"
+        logger.error("AgentSession error: %s", ev)
+
+    # RoomIO must deliver mono PCM at the same rate Sarvam STT expects.
+    # Default RoomIO is 24 kHz → would force RecognizeStream sox resampler.
+    room_options = RoomOptions(
+        participant_identity=participant.identity,
+        audio_input=AudioInputOptions(
+            sample_rate=PIPELINE_SAMPLE_RATE,
+            num_channels=1,
+            frame_size_ms=50,
+            auto_gain_control=True,
+        ),
+    )
+
+    await agent_session.start(
+        agent=agent,
+        room=ctx.room,
+        room_options=room_options,
+    )
+
+    room_io = getattr(agent_session, "_room_io", None)
+    if room_io is not None:
+        try:
+            await room_io.wait_for_ready()
+            linked = room_io.linked_participant
+            logger.info(
+                "RoomIO ready — listening to %s (STT @ %d Hz)",
+                linked.identity if linked else "(none)",
+                PIPELINE_SAMPLE_RATE,
+            )
+        except Exception:
+            logger.exception("RoomIO wait_for_ready failed")
+
+    greeting = session_mgr.build_greeting()
+    logger.info("Greeting: %s", greeting)
+    await agent_session.say(greeting, allow_interruptions=True)
 
 
-def prewarm(proc: JobProcess):
-    """
-    Pre-warm expensive resources once per worker process.
-    Called before any jobs are dispatched.
-    """
-    # TODO: Pre-load VAD model
-    # from livekit.plugins import silero
-    # proc.userdata["vad"] = silero.VAD.load()
-    logger.info("Worker pre-warmed")
+def prewarm(proc: JobProcess) -> None:
+    """Load Silero VAD once per worker (KB: avoid cold start on first speech)."""
+    # Tuned for PCR: short speech ok, slightly snappy end-of-turn
+    proc.userdata["vad"] = silero.VAD.load(
+        min_speech_duration=0.1,
+        min_silence_duration=0.35,
+        prefix_padding_duration=0.3,
+        activation_threshold=0.5,
+    )
+    logger.info("Worker pre-warmed (Silero VAD)")
 
 
 if __name__ == "__main__":

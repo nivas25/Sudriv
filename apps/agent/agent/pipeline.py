@@ -1,101 +1,96 @@
 """
 Voice Pipeline Builder
 
-Constructs the VoicePipelineAgent with STT, LLM, TTS, and tools.
+LiveKit Agents 1.6.x:
+  STT  → Sarvam Saaras v3
+  LLM  → OpenAI gpt-4o-mini (livekit.plugins.openai.LLM)
+  TTS  → Sarvam Bulbul v3
+  Tools → SudrivToolkit
 
-See: knowledge-base/05-voice-agent-design.md
+Audio: RoomIO sample_rate must match STT (16 kHz mono).
 """
 
+from __future__ import annotations
+
 import logging
+import os
+from dataclasses import dataclass
+from typing import Any
 
 from livekit.agents import llm
-from livekit.agents.voice import VoicePipelineAgent
 
+from agent.llm_clients import OPENAI_MODEL, create_conversation_llm
+from agent.plugins.sarvam_stt import SARVAM_STT_SAMPLE_RATE, create_sarvam_stt
+from agent.plugins.sarvam_tts import create_sarvam_tts
 from agent.prompts import build_system_prompt
 from agent.session import SessionManager
 from agent.tools import SudrivToolkit
 
 logger = logging.getLogger("sudriv-agent.pipeline")
 
+PIPELINE_SAMPLE_RATE = SARVAM_STT_SAMPLE_RATE
 
-async def build_voice_agent(session: SessionManager) -> VoicePipelineAgent:
-    """
-    Build the complete voice pipeline agent with all components.
 
-    Components:
-    - STT: Sarvam Saaras v3 (Hindi + English + Hinglish)
-    - LLM: Groq Llama 3.3 70B (via OpenAI-compatible API)
-    - TTS: Sarvam Bulbul v3
-    - Tools: 5 core tools for running order management
+@dataclass(frozen=True)
+class VoicePipeline:
+    stt: Any
+    llm: Any
+    tts: Any
+    tools: list
+    instructions: str
+    sample_rate: int = PIPELINE_SAMPLE_RATE
+    conversation_model: str = OPENAI_MODEL
 
-    See: knowledge-base/09-language-and-voice-pipeline.md
-    """
 
-    # --- STT Configuration ---
-    # TODO: Replace with Sarvam STT plugin when available
-    # For now, using a placeholder. See knowledge-base/09-language-and-voice-pipeline.md
-    # for custom plugin implementation.
-    #
-    # stt = SarvamSTT(
-    #     api_key=os.environ["SARVAM_API_KEY"],
-    #     model="saaras:v3",
-    #     language="hi-IN",
-    # )
+def build_voice_pipeline(session: SessionManager) -> VoicePipeline:
+    """Build STT / OpenAI LLM / TTS / tools for one session."""
+    sarvam_api_key = os.environ.get("SARVAM_API_KEY", "")
+    if not sarvam_api_key:
+        raise ValueError("SARVAM_API_KEY is required for STT/TTS. Set apps/agent/.env")
 
-    # --- LLM Configuration ---
-    # Groq uses OpenAI-compatible API
-    # TODO: Configure Groq LLM
-    # from livekit.plugins.openai import LLM as OpenAILLM
-    #
-    # llm_instance = OpenAILLM(
-    #     model="llama-3.3-70b-versatile",
-    #     api_key=os.environ["GROQ_API_KEY"],
-    #     base_url="https://api.groq.com/openai/v1",
-    #     temperature=0.3,
-    # )
+    # Language: auto-detect + codemix so EN / HI / Hinglish all work.
+    stt_instance = create_sarvam_stt(
+        api_key=sarvam_api_key,
+        language="unknown",
+        model="saaras:v3",
+        mode="codemix",
+        sample_rate=PIPELINE_SAMPLE_RATE,
+        high_vad_sensitivity=True,
+        flush_signal=True,
+    )
 
-    # --- TTS Configuration ---
-    # TODO: Replace with Sarvam TTS plugin when available
-    # tts = SarvamTTS(
-    #     api_key=os.environ["SARVAM_API_KEY"],
-    #     model="bulbul:v3",
-    #     voice="meera",
-    # )
+    # Official LiveKit OpenAI plugin — no Groq.
+    llm_instance = create_conversation_llm()
 
-    # --- Tools ---
+    tts_instance = create_sarvam_tts(
+        api_key=sarvam_api_key,
+        model="bulbul:v3",
+        speaker="ritu",
+        target_language_code="en-IN",  # bilingual-capable; prompt controls spoken language
+        speech_sample_rate=22050,
+        pace=1.1,
+        min_buffer_size=40,
+        max_chunk_length=120,
+    )
+
     toolkit = SudrivToolkit(session=session)
+    agent_tools = llm.find_function_tools(toolkit)
+    instructions = build_system_prompt(session)
 
-    # --- Chat Context ---
-    chat_ctx = llm.ChatContext()
-    chat_ctx.append(
-        role="system",
-        text=build_system_prompt(session),
+    logger.info(
+        "Pipeline ready: STT=saaras:v3/codemix/unknown | LLM=openai/%s | "
+        "prompt_chars=%d | TTS=bulbul:v3",
+        OPENAI_MODEL,
+        len(instructions),
     )
+    logger.debug("System prompt:\n%s", instructions)
 
-    # --- Build Agent ---
-    # TODO: Uncomment and configure once STT/LLM/TTS plugins are ready
-    #
-    # agent = VoicePipelineAgent(
-    #     vad=silero.VAD.load(),
-    #     stt=stt,
-    #     llm=llm_instance,
-    #     tts=tts,
-    #     chat_ctx=chat_ctx,
-    #     fnc_ctx=toolkit.to_function_context(),
-    #     allow_interruptions=True,
-    #     interrupt_speech_duration=0.5,
-    #     interrupt_min_words=1,
-    #     min_endpointing_delay=0.5,
-    # )
-
-    # Placeholder — will be replaced with actual agent
-    logger.warning("Voice pipeline not fully configured — using placeholder")
-
-    # For scaffolding, return a minimal agent
-    # This will be replaced once API keys are configured
-    agent = VoicePipelineAgent(
-        chat_ctx=chat_ctx,
-        fnc_ctx=toolkit.to_function_context(),
+    return VoicePipeline(
+        stt=stt_instance,
+        llm=llm_instance,
+        tts=tts_instance,
+        tools=agent_tools,
+        instructions=instructions,
+        sample_rate=PIPELINE_SAMPLE_RATE,
+        conversation_model=OPENAI_MODEL,
     )
-
-    return agent

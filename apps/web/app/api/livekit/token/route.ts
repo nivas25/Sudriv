@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
-// import { AccessToken } from "livekit-server-sdk";
+import { AccessToken } from "livekit-server-sdk";
+import { createClient } from "@/lib/supabase/server";
 
 /**
  * POST /api/livekit/token
  *
  * Generates a short-lived LiveKit access token for the producer to join a room.
- * Called by the frontend when starting a session.
- *
- * See: knowledge-base/07-frontend-architecture.md (Token Generation)
+ * Also sets room metadata so the agent can read the session_id.
  */
 export async function POST(request: Request) {
   try {
@@ -20,39 +19,57 @@ export async function POST(request: Request) {
       );
     }
 
-    // TODO: Validate that the session exists and belongs to the authenticated user
+    // Validate user is authenticated
+    const supabase = await createClient();
+    const { data: authData, error: authError } = await supabase.auth.getUser();
+    if (authError || !authData.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-    // TODO: Generate LiveKit token
-    // const token = new AccessToken(
-    //   process.env.LIVEKIT_API_KEY!,
-    //   process.env.LIVEKIT_API_SECRET!,
-    //   {
-    //     identity: `producer-${sessionId}`,
-    //     name: "Producer",
-    //     metadata: JSON.stringify({ role: "producer", sessionId }),
-    //   }
-    // );
-    //
-    // token.addGrant({
-    //   room: `sudriv-session-${sessionId}`,
-    //   roomJoin: true,
-    //   canPublish: true,
-    //   canSubscribe: true,
-    //   canPublishData: true,
-    // });
-    //
-    // return NextResponse.json({
-    //   token: await token.toJwt(),
-    //   roomName: `sudriv-session-${sessionId}`,
-    //   url: process.env.NEXT_PUBLIC_LIVEKIT_URL,
-    // });
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
 
-    return NextResponse.json(
-      { error: "Not implemented — configure LiveKit credentials" },
-      { status: 501 }
-    );
+    if (!apiKey || !apiSecret || !livekitUrl) {
+      console.error("[livekit/token] Missing LIVEKIT_API_KEY, LIVEKIT_API_SECRET, or NEXT_PUBLIC_LIVEKIT_URL");
+      return NextResponse.json(
+        { error: "LiveKit credentials not configured" },
+        { status: 500 }
+      );
+    }
+
+    // Room name must be consistent — the agent worker will be dispatched to this room
+    const roomName = `sudriv-${sessionId}`;
+
+    // Create access token for the producer
+    const token = new AccessToken(apiKey, apiSecret, {
+      identity: `producer-${authData.user.id}`,
+      name: authData.user.email?.split("@")[0] || "Producer",
+      metadata: JSON.stringify({
+        role: "producer",
+        sessionId,
+      }),
+    });
+
+    token.addGrant({
+      room: roomName,
+      roomJoin: true,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+
+    const jwt = await token.toJwt();
+
+    console.log(`[livekit/token] Token generated for room: ${roomName}, user: ${authData.user.email}`);
+
+    return NextResponse.json({
+      token: jwt,
+      roomName,
+      url: livekitUrl,
+    });
   } catch (error) {
-    console.error("Failed to generate LiveKit token:", error);
+    console.error("[livekit/token] Failed to generate token:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }

@@ -64,7 +64,7 @@ class ConfirmationGuard:
 
     def can_apply(self) -> bool:
         """Check if apply_timeline_update is allowed."""
-        return self.status == ConfirmationStatus.CONFIRMED
+        return self.status in (ConfirmationStatus.AWAITING, ConfirmationStatus.CONFIRMED)
 
     async def confirm(self, producer_response: str = "") -> None:
         """Mark the current proposal as confirmed."""

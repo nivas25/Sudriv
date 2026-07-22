@@ -17,33 +17,45 @@ export function MetadataPanel({ sessionId }: { sessionId: string }) {
     }
 
     const loadActiveSegment = async () => {
-      // Find on_air segment first
+      // 1. Fetch running order ID first
+      const { data: roData } = await supabase
+        .from("running_orders")
+        .select("id")
+        .eq("session_id", sessionId)
+        .order("version", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!roData?.id) {
+        setLoading(false);
+        return;
+      }
+
+      // 2. Find on_air segment first
       let { data: activeSeg } = await supabase
         .from("segments")
         .select("*")
-        .eq("running_order_id", (
-           await supabase.from("running_orders").select("id").eq("session_id", sessionId).order("version", { ascending: false }).limit(1).single()
-        ).data?.id || "")
+        .eq("running_order_id", roData.id)
         .eq("status", "on_air")
         .limit(1)
-        .single();
+        .maybeSingle();
         
       if (!activeSeg) {
-        // Fallback to first pending segment
+        // 3. Fallback to first pending segment
         const { data: pendingData } = await supabase
           .from("segments")
           .select("*")
-          .eq("running_order_id", (
-             await supabase.from("running_orders").select("id").eq("session_id", sessionId).order("version", { ascending: false }).limit(1).single()
-          ).data?.id || "")
+          .eq("running_order_id", roData.id)
           .eq("status", "pending")
           .order("position", { ascending: true })
           .limit(1)
-          .single();
+          .maybeSingle();
         activeSeg = pendingData;
       }
 
-      setSegment(activeSeg);
+      if (activeSeg) {
+        setSegment(activeSeg);
+      }
       setLoading(false);
     };
 

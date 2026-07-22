@@ -1,100 +1,324 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { MessageSquare, Mic, User, Cpu } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  MessageSquare,
+  Mic,
+  MicOff,
+  User,
+  Cpu,
+  Loader2,
+  Volume2,
+  AlertCircle,
+} from "lucide-react";
+import {
+  useRoomContext,
+  useConnectionState,
+  useLocalParticipant,
+  useVoiceAssistant,
+} from "@livekit/components-react";
+import {
+  ConnectionState,
+  RoomEvent,
+  Track,
+  type TranscriptionSegment,
+} from "livekit-client";
+import { useLiveKitReady } from "@/components/voice/livekit-session-provider";
 
+interface Message {
+  id: string;
+  role: "human" | "ai";
+  text: string;
+  timestamp: Date;
+}
+
+/**
+ * TranscriptPanel — AI Copilot Feed
+ *
+ * Outer shell never calls LiveKit hooks until the room provider is ready.
+ */
 export function TranscriptPanel({ sessionId }: { sessionId: string }) {
-  const [isListening, setIsListening] = useState(false);
-  const [messages, setMessages] = useState<any[]>([]);
-  const supabase = createClient();
+  const ready = useLiveKitReady();
+  if (!ready) {
+    return <TranscriptPanelDisconnected />;
+  }
+  return <TranscriptPanelConnected sessionId={sessionId} />;
+}
+
+function TranscriptPanelDisconnected() {
+  return (
+    <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden">
+      <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100">
+        <div className="flex items-center gap-3">
+          <MessageSquare className="w-5 h-5 text-gray-400" />
+          <h2 className="font-heading font-bold text-lg text-gray-900 tracking-tight">
+            AI Copilot Feed
+          </h2>
+        </div>
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-sm bg-amber-500 shadow-sm">
+          <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+          <span className="text-[10px] font-bold text-white uppercase tracking-widest">
+            Connecting…
+          </span>
+        </div>
+      </div>
+      <div className="flex-1 flex flex-col items-center justify-center gap-4">
+        <Loader2 className="w-8 h-8 text-gray-300 animate-spin" />
+        <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">
+          Preparing voice connection…
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
+  const room = useRoomContext();
+  const connectionState = useConnectionState();
+  const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
+  const { state: agentState } = useVoiceAssistant();
+
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [micLabel, setMicLabel] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const isConnected = connectionState === ConnectionState.Connected;
+
+  const toggleMic = useCallback(async () => {
+    if (!localParticipant) return;
+    setMicError(null);
+    try {
+      const next = !isMicrophoneEnabled;
+      if (next) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach((t) => t.stop());
+        } catch (permErr) {
+          const msg =
+            permErr instanceof DOMException && permErr.name === "NotAllowedError"
+              ? "Allow microphone access in the browser (lock / site settings in the address bar)."
+              : permErr instanceof DOMException && permErr.name === "NotFoundError"
+                ? "No microphone detected. Check Windows Settings → System → Sound → Input."
+                : "Could not access microphone.";
+          setMicError(msg);
+          return;
+        }
+      }
+
+      await localParticipant.setMicrophoneEnabled(next, {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
+
+      const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
+      setMicLabel(pub?.track?.mediaStreamTrack?.label ?? null);
+      console.log("[TranscriptPanel] Mic toggled", {
+        enabled: next,
+        label: pub?.track?.mediaStreamTrack?.label,
+        sessionId,
+      });
+    } catch (e) {
+      console.error("[TranscriptPanel] Failed to toggle mic:", e);
+      setMicError(e instanceof Error ? e.message : "Failed to toggle microphone");
+    }
+  }, [localParticipant, isMicrophoneEnabled, sessionId]);
 
   useEffect(() => {
-    if (sessionId === "demo") return;
+    if (!localParticipant || !isMicrophoneEnabled) return;
+    const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
+    setMicLabel(pub?.track?.mediaStreamTrack?.label ?? null);
+  }, [localParticipant, isMicrophoneEnabled]);
 
-    const fetchEvents = async () => {
-      const { data } = await supabase
-        .from("session_events")
-        .select("*")
-        .eq("session_id", sessionId)
-        .order("created_at", { ascending: true });
-      
-      if (data) {
-        setMessages(data.map(event => ({
-          id: event.id,
-          role: event.source === "agent" ? "ai" : "human",
-          text: event.payload?.text || "Unknown event"
-        })));
+  useEffect(() => {
+    if (!room) return;
+
+    const handleTranscription = (
+      segments: TranscriptionSegment[],
+      participant: { identity?: string } | undefined,
+    ) => {
+      for (const segment of segments) {
+        if (!segment.final || !segment.text?.trim()) continue;
+
+        const isProducer = participant?.identity?.startsWith("producer");
+        const role: "human" | "ai" = isProducer ? "human" : "ai";
+
+        setMessages((prev) => {
+          const existing = prev.find((m) => m.id === segment.id);
+          if (existing) {
+            return prev.map((m) =>
+              m.id === segment.id ? { ...m, text: segment.text } : m,
+            );
+          }
+          return [
+            ...prev,
+            {
+              id: segment.id,
+              role,
+              text: segment.text,
+              timestamp: new Date(),
+            },
+          ];
+        });
       }
     };
 
-    fetchEvents();
+    room.on(RoomEvent.TranscriptionReceived, handleTranscription);
+    return () => {
+      room.off(RoomEvent.TranscriptionReceived, handleTranscription);
+    };
+  }, [room]);
 
-    const channel = supabase
-      .channel(`transcript-${sessionId}`)
-      .on("postgres_changes", {
-        event: "INSERT",
-        schema: "public",
-        table: "session_events",
-        filter: `session_id=eq.${sessionId}`
-      }, (payload) => {
-        const event = payload.new;
-        setMessages(prev => [...prev, {
-          id: event.id,
-          role: event.source === "agent" ? "ai" : "human",
-          text: event.payload?.text || "Unknown event"
-        }]);
-      })
-      .subscribe();
+  useEffect(() => {
+    if (agentState) {
+      console.log("[TranscriptPanel] Agent state:", agentState);
+    }
+  }, [agentState]);
 
-    return () => { supabase.removeChannel(channel); };
-  }, [sessionId]);
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  const statusColor = isConnected
+    ? isMicrophoneEnabled
+      ? "bg-emerald-600"
+      : "bg-amber-500"
+    : connectionState === ConnectionState.Connecting
+      ? "bg-amber-500"
+      : "bg-gray-400";
+
+  const statusText = !isConnected
+    ? connectionState === ConnectionState.Connecting
+      ? "Connecting…"
+      : "Disconnected"
+    : isMicrophoneEnabled
+      ? "Mic on"
+      : "Mic muted";
+
+  const agentLabel =
+    agentState === "listening"
+      ? "Agent listening"
+      : agentState === "thinking"
+        ? "Agent thinking"
+        : agentState === "speaking"
+          ? "Agent speaking"
+          : agentState === "connecting"
+            ? "Agent connecting"
+            : "Agent idle";
 
   return (
     <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden">
-      {/* Header */}
       <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 bg-white">
         <div className="flex items-center gap-3">
           <MessageSquare className="w-5 h-5 text-gray-400" />
-          <h2 className="font-heading font-bold text-lg text-gray-900 tracking-tight">AI Copilot Feed</h2>
+          <h2 className="font-heading font-bold text-lg text-gray-900 tracking-tight">
+            AI Copilot Feed
+          </h2>
         </div>
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-sm bg-emerald-600 shadow-sm">
-          <div className="w-2 h-2 rounded-full bg-white animate-pulse"></div>
-          <span className="text-[10px] font-bold text-white uppercase tracking-widest">Active</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest hidden sm:inline">
+            {agentLabel}
+          </span>
+          <div
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-sm ${statusColor} shadow-sm`}
+          >
+            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+            <span className="text-[10px] font-bold text-white uppercase tracking-widest">
+              {statusText}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Message List */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-8 bg-gray-50/30">
-        {messages.length === 0 ? (
-          <p className="text-sm font-bold text-gray-400 uppercase tracking-widest text-center py-8">
-            No events yet.
-          </p>
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto p-6 space-y-8 bg-gray-50/30"
+      >
+        {micError && (
+          <div className="flex items-start gap-3 p-4 rounded-xl bg-red-50 border border-red-100 text-red-700">
+            <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+            <div className="text-sm font-medium leading-relaxed">{micError}</div>
+          </div>
+        )}
+
+        {!isConnected ? (
+          <div className="flex flex-col items-center justify-center py-12 gap-4">
+            {connectionState === ConnectionState.Connecting ? (
+              <>
+                <Loader2 className="w-8 h-8 text-gray-300 animate-spin" />
+                <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">
+                  Connecting to AI agent…
+                </p>
+              </>
+            ) : (
+              <>
+                <Volume2 className="w-8 h-8 text-gray-300" />
+                <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">
+                  Waiting for connection…
+                </p>
+              </>
+            )}
+          </div>
+        ) : messages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 gap-3 px-6 text-center">
+            <p className="text-sm font-bold text-gray-500 uppercase tracking-widest">
+              {isMicrophoneEnabled
+                ? "Mic is on — speak to the agent"
+                : "Turn the mic on, then speak"}
+            </p>
+            {micLabel && (
+              <p className="text-xs text-gray-400">Using: {micLabel}</p>
+            )}
+            <p className="text-xs text-gray-400 max-w-sm leading-relaxed">
+              If the agent still cannot hear you: allow microphone for this site
+              in the browser, and check Windows Settings → System → Sound → Input.
+            </p>
+          </div>
         ) : (
           messages.map((msg) => (
-            <div key={msg.id} className={`flex ${msg.role === "human" ? "justify-end" : "justify-start"}`}>
-              <div className={`flex gap-4 max-w-[85%] ${msg.role === "human" ? "flex-row-reverse" : "flex-row"}`}>
-                {/* Avatar */}
+            <div
+              key={msg.id}
+              className={`flex ${msg.role === "human" ? "justify-end" : "justify-start"}`}
+            >
+              <div
+                className={`flex gap-4 max-w-[85%] ${
+                  msg.role === "human" ? "flex-row-reverse" : "flex-row"
+                }`}
+              >
                 <div className="flex-shrink-0">
-                  <div className={`w-8 h-8 flex items-center justify-center rounded-sm border-2 ${
-                    msg.role === "human" 
-                      ? "bg-primary text-white border-primary shadow-sm" 
-                      : "bg-gray-900 text-white border-gray-900 shadow-sm"
-                  }`}>
-                    {msg.role === "human" ? <User className="w-4 h-4" /> : <Cpu className="w-4 h-4" />}
+                  <div
+                    className={`w-8 h-8 flex items-center justify-center rounded-sm border-2 ${
+                      msg.role === "human"
+                        ? "bg-primary text-white border-primary shadow-sm"
+                        : "bg-gray-900 text-white border-gray-900 shadow-sm"
+                    }`}
+                  >
+                    {msg.role === "human" ? (
+                      <User className="w-4 h-4" />
+                    ) : (
+                      <Cpu className="w-4 h-4" />
+                    )}
                   </div>
                 </div>
-                
-                {/* Bubble */}
-                <div className={`flex flex-col ${msg.role === "human" ? "items-end" : "items-start"}`}>
+
+                <div
+                  className={`flex flex-col ${
+                    msg.role === "human" ? "items-end" : "items-start"
+                  }`}
+                >
                   <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">
                     {msg.role === "human" ? "Producer" : "Sudriv AI"}
                   </span>
-                  <div className={`px-5 py-3.5 border shadow-sm ${
-                    msg.role === "human"
-                      ? "bg-white border-primary/20 text-gray-900 rounded-2xl rounded-tr-sm"
-                      : "bg-white border-gray-200 text-gray-900 rounded-2xl rounded-tl-sm"
-                  }`}>
+                  <div
+                    className={`px-5 py-3.5 border shadow-sm ${
+                      msg.role === "human"
+                        ? "bg-white border-primary/20 text-gray-900 rounded-2xl rounded-tr-sm"
+                        : "bg-white border-gray-200 text-gray-900 rounded-2xl rounded-tl-sm"
+                    }`}
+                  >
                     <p className="text-sm font-medium leading-relaxed">{msg.text}</p>
                   </div>
                 </div>
@@ -104,27 +328,43 @@ export function TranscriptPanel({ sessionId }: { sessionId: string }) {
         )}
       </div>
 
-      {/* Voice Control Area */}
       <div className="p-4 sm:p-6 bg-white border-t border-gray-100 flex flex-col items-center justify-center gap-3">
-        <button 
-          onClick={() => setIsListening(!isListening)}
-          className={`flex items-center justify-center w-16 h-16 rounded-full shadow-lg transition-all duration-300 active:scale-95 group relative ${
-            isListening 
-              ? "bg-primary text-white shadow-primary/30" 
-              : "bg-gray-900 text-white hover:scale-105 hover:bg-gray-800"
+        <button
+          onClick={toggleMic}
+          disabled={!isConnected}
+          aria-pressed={isMicrophoneEnabled}
+          aria-label={isMicrophoneEnabled ? "Mute microphone" : "Unmute microphone"}
+          className={`flex items-center justify-center w-16 h-16 rounded-full shadow-lg transition-all duration-300 active:scale-95 relative ${
+            !isConnected
+              ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+              : isMicrophoneEnabled
+                ? "bg-emerald-600 text-white shadow-emerald-600/30"
+                : "bg-gray-900 text-white hover:scale-105 hover:bg-gray-800"
           }`}
         >
-          {isListening && (
-            <div className="absolute inset-0 rounded-full border-2 border-primary animate-ping opacity-75"></div>
+          {isMicrophoneEnabled && (
+            <div className="absolute inset-0 rounded-full border-2 border-emerald-400 animate-ping opacity-40" />
           )}
-          {isListening ? (
-             <div className="w-5 h-5 rounded-sm bg-white" />
+          {isMicrophoneEnabled ? (
+            <Mic className="w-6 h-6" />
           ) : (
-             <Mic className="w-6 h-6" />
+            <MicOff className="w-6 h-6" />
           )}
         </button>
-        <span className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${isListening ? "text-primary animate-pulse" : "text-gray-400"}`}>
-          {isListening ? "Listening..." : "Tap to Speak"}
+        <span
+          className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${
+            !isConnected
+              ? "text-gray-300"
+              : isMicrophoneEnabled
+                ? "text-emerald-600 animate-pulse"
+                : "text-gray-400"
+          }`}
+        >
+          {!isConnected
+            ? "Not connected"
+            : isMicrophoneEnabled
+              ? "Listening — speak now"
+              : "Mic off — tap to speak"}
         </span>
       </div>
     </div>

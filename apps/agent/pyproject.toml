@@ -7,18 +7,14 @@ requires-python = ">=3.11"
 
 dependencies = [
     # LiveKit Agents SDK
-    "livekit-agents>=1.0.0",
+    "livekit-agents[sarvam]~=1.6",
     "livekit-plugins-silero>=1.0.0",
-
     # LLM — Groq
-    "livekit-plugins-openai>=1.0.0",  # Groq uses OpenAI-compatible API
-
+    "livekit-plugins-openai>=1.0.0", # Groq uses OpenAI-compatible API
     # Database
     "supabase>=2.0.0",
-
     # Redis
     "redis[hiredis]>=5.0.0",
-
     # Utilities
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",

@@ -1051,6 +1051,12 @@ codecs = [
 images = [
     { name = "pillow" },
 ]
+openai = [
+    { name = "livekit-plugins-openai" },
+]
+sarvam = [
+    { name = "livekit-plugins-sarvam" },
+]
 
 [[package]]
 name = "livekit-api"
@@ -1138,6 +1144,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/07/8b/c6616f56097a000cded518257dd70bf679175726893f3d3bacdf81a94c63/livekit_plugins_openai-1.6.6.tar.gz", hash = "sha256:e52505ec478ceab7dcca87f32bf7e59406a68c9838f5f6e717d6609d8240fa49", size = 48505, upload-time = "2026-07-18T04:18:33.773Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7e/26/637e4ef8584675cdfbc228fac6ccfc8ffe3fde84ae472df08f02b9ee29ad/livekit_plugins_openai-1.6.6-py3-none-any.whl", hash = "sha256:37a5db03d4875c4ea3a68acdcc001b8b4900d59746b7feb955d2e8530fc43d46", size = 54994, upload-time = "2026-07-18T04:18:32.428Z" },
+]
+
+[[package]]
+name = "livekit-plugins-sarvam"
+version = "1.6.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "livekit-agents", extra = ["codecs", "openai"] },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ae/c3/cf6ccc51f18c3ac785989509a05d72b08ca7de8e0936c8edb1dd387a4ad3/livekit_plugins_sarvam-1.6.6.tar.gz", hash = "sha256:28d0090ee9683e4aa2c3671a06cbad5c0d7053afcf7c180b8989763e07342596", size = 31664, upload-time = "2026-07-18T04:18:47.239Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/92/af5baec99a021812969c3e3b52e79a0f30c5cdbe85222ac0d7872b0933b4/livekit_plugins_sarvam-1.6.6-py3-none-any.whl", hash = "sha256:438dfc863da3de5112c91b866eed74c765e21444165bd23ed43f2ce744cfcfb6", size = 34459, upload-time = "2026-07-18T04:18:46.19Z" },
 ]
 
 [[package]]
@@ -2298,7 +2318,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
-    { name = "livekit-agents" },
+    { name = "livekit-agents", extra = ["sarvam"] },
     { name = "livekit-plugins-openai" },
     { name = "livekit-plugins-silero" },
     { name = "pydantic" },
@@ -2317,7 +2337,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "livekit-agents", specifier = ">=1.0.0" },
+    { name = "livekit-agents", extras = ["sarvam"], specifier = "~=1.6" },
     { name = "livekit-plugins-openai", specifier = ">=1.0.0" },
     { name = "livekit-plugins-silero", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },

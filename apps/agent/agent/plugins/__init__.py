@@ -1,10 +1,14 @@
 """
-Custom Sarvam AI Plugins
-
-LiveKit STT/TTS plugins for Sarvam Saaras (STT) and Bulbul (TTS).
-These wrap the Sarvam API for use in the LiveKit Agents voice pipeline.
-
-See: knowledge-base/09-language-and-voice-pipeline.md
-
-TODO: Implement full plugin wrappers based on knowledge-base specs.
+Sudriv voice plugins (thin factories over official LiveKit Sarvam plugins).
 """
+
+from agent.plugins.sarvam_stt import SARVAM_STT_SAMPLE_RATE, SarvamSTT, create_sarvam_stt
+from agent.plugins.sarvam_tts import SarvamTTS, create_sarvam_tts
+
+__all__ = [
+    "SARVAM_STT_SAMPLE_RATE",
+    "SarvamSTT",
+    "SarvamTTS",
+    "create_sarvam_stt",
+    "create_sarvam_tts",
+]

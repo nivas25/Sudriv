@@ -23,7 +23,7 @@ export function SessionControls({ sessionId }: { sessionId: string }) {
         .from("sessions")
         .select("started_at, created_at, timeline_template_id")
         .eq("id", sessionId)
-        .single();
+        .maybeSingle();
 
       if (session) {
         setStartedAt(session.started_at || session.created_at);
@@ -35,7 +35,7 @@ export function SessionControls({ sessionId }: { sessionId: string }) {
           .eq("session_id", sessionId)
           .order("version", { ascending: false })
           .limit(1)
-          .single();
+          .maybeSingle();
 
         if (ro) {
           setTotalDuration(ro.total_duration_seconds);

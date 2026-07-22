@@ -1,8 +1,12 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
   // Enable React strict mode for development safety
   reactStrictMode: true,
+
+  // Monorepo root (avoids wrong lockfile root inference with apps/web/package-lock.json)
+  outputFileTracingRoot: path.join(__dirname, "../.."),
 
   // Transpile workspace packages
   transpilePackages: ["@sudriv/shared", "@sudriv/database"],

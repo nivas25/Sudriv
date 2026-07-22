@@ -29,7 +29,7 @@ export function Header() {
           .from("users")
           .select("display_name, role")
           .eq("email", user.email)
-          .single();
+          .maybeSingle();
         
         if (profile) {
           setUserName(profile.display_name || user.email || "User");
@@ -49,7 +49,7 @@ export function Header() {
         .select("name, default_duration_seconds, default_segments")
         .eq("is_active", true)
         .limit(1)
-        .single();
+        .maybeSingle();
       
       if (data) {
         setTemplateName(data.name);
