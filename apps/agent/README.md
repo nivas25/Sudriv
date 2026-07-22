@@ -1,13 +1,22 @@
-# Sudriv Agent
+# Sudriv Voice Agent
 
-Voice AI co-pilot for news producers, built with the LiveKit Agents SDK.
+LiveKit Agents worker (Python) for Sudriv.
 
-## Setup
-1. Copy `.env.example` to `.env` and fill in the values.
-2. Run `uv sync` to install dependencies.
+## Run
 
-## Development
-Run the agent in development mode (with auto-reload):
 ```bash
-uv run python main.py dev
+uv sync
+uv run python main.py dev     # local development
+uv run python main.py start   # production (Railway / Docker)
 ```
+
+Health: `http://0.0.0.0:$PORT/` (default `8081`).
+
+## Deploy
+
+Root docs: [DEPLOY.md](../../DEPLOY.md).  
+Files: `Dockerfile`, `railway.toml`, `Procfile`.
+
+## Environment
+
+See `.env.example`. Required: LiveKit, Supabase service key, Redis, OpenAI, Sarvam.

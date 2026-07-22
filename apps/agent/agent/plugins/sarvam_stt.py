@@ -88,18 +88,15 @@ def create_sarvam_stt(
     resolved_language = (
         language
         or os.environ.get("SARVAM_STT_LANGUAGE")
-        or "en-IN"
+        or "hi-IN"
     )
     resolved_mode = os.environ.get("SARVAM_STT_MODE") or mode
 
-    # Guard against accidental free-form auto-detect in production.
+    # Never use free-form auto-detect (random Kannada/Odia, etc.)
     if resolved_language == "unknown":
-        logger.warning(
-            "STT language=unknown can mis-detect regional languages; "
-            "forcing en-IN + codemix for Sudriv production"
-        )
-        resolved_language = "en-IN"
-        resolved_mode = "codemix"
+        logger.warning("STT language=unknown blocked — forcing hi-IN")
+        resolved_language = "hi-IN"
+        resolved_mode = "transcribe"
 
     stt = sarvam.STT(
         api_key=key,

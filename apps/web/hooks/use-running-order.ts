@@ -1,89 +1,161 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+export type RunningOrderSegment = {
+  id: string;
+  running_order_id?: string;
+  position: number;
+  title: string;
+  slug?: string;
+  segment_type: string;
+  duration_seconds: number;
+  start_offset_seconds?: number;
+  teleprompter_text?: string;
+  status: string;
+  news_item_id?: string | null;
+};
+
+type RunningOrderPayload = {
+  sessionId: string;
+  runningOrderId: string | null;
+  version: number;
+  totalDurationSeconds: number;
+  segments: RunningOrderSegment[];
+  activeSegment: RunningOrderSegment | null;
+  error?: string;
+};
+
+const POLL_MS = 1500;
 
 /**
- * Live running order for a session.
- *
- * Agent updates via:
- *   UPDATE running_orders (version / duration)
- *   DELETE + INSERT segments
- * so we must listen for UPDATE + INSERT + DELETE, not only INSERT on RO.
+ * Live running order — API fetch + fast poll + manual refresh.
  */
 export function useRunningOrder(sessionId: string) {
-  const [segments, setSegments] = useState<any[]>([]);
+  const [segments, setSegments] = useState<RunningOrderSegment[]>([]);
   const [totalDuration, setTotalDuration] = useState(0);
   const [version, setVersion] = useState(0);
+  const [activeSegment, setActiveSegment] = useState<RunningOrderSegment | null>(
+    null,
+  );
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null);
+  const lastFingerprintRef = useRef<string>("");
+  const inFlightRef = useRef(false);
 
-  const loadInitial = useCallback(async () => {
-    if (sessionId === "demo") {
-      setIsLoading(false);
-      return;
-    }
+  const load = useCallback(
+    async (reason: string) => {
+      if (!sessionId || sessionId === "demo") {
+        setIsLoading(false);
+        return;
+      }
 
-    const supabase = createClient();
-    const { data: ro } = await supabase
-      .from("running_orders")
-      .select("*, segments(*)")
-      .eq("session_id", sessionId)
-      .order("version", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      // Avoid stacking poll requests; manual refresh always runs.
+      if (inFlightRef.current && reason !== "manual") return;
+      inFlightRef.current = true;
 
-    if (ro) {
-      const segs = Array.isArray(ro.segments)
-        ? [...ro.segments].sort((a: any, b: any) => a.position - b.position)
-        : [];
-      setSegments(segs);
-      setTotalDuration(ro.total_duration_seconds ?? 0);
-      setVersion(ro.version ?? 0);
-    }
-    setIsLoading(false);
-  }, [sessionId]);
+      const isManual = reason === "manual";
+      if (isManual) setIsRefreshing(true);
+
+      try {
+        // Cache-bust so browsers / proxies never serve stale RO
+        const url = `/api/session/${sessionId}/running-order?t=${Date.now()}&r=${encodeURIComponent(reason)}`;
+        const res = await fetch(url, {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        });
+
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          const msg =
+            (body as { error?: string }).error || `HTTP ${res.status}`;
+          console.error("[useRunningOrder] fetch failed", {
+            reason,
+            msg,
+            sessionId,
+          });
+          setError(msg);
+          return;
+        }
+
+        const data: RunningOrderPayload = await res.json();
+        const segs = Array.isArray(data.segments) ? data.segments : [];
+        const fingerprint = `${data.version}:${segs.length}:${segs
+          .map((s) => `${s.id}:${s.position}:${s.title}`)
+          .join("|")}`;
+
+        const changed = fingerprint !== lastFingerprintRef.current;
+        if (changed || isManual) {
+          console.info("[useRunningOrder] update", {
+            reason,
+            version: data.version,
+            segments: segs.length,
+            active: data.activeSegment?.title ?? null,
+            sessionId: sessionId.slice(0, 8),
+            changed,
+          });
+          lastFingerprintRef.current = fingerprint;
+        }
+
+        // Always apply state so manual refresh re-renders even if data identical
+        setSegments(segs);
+        setTotalDuration(data.totalDurationSeconds ?? 0);
+        setVersion(data.version ?? 0);
+        setActiveSegment(data.activeSegment ?? null);
+        setError(null);
+        setLastFetchedAt(Date.now());
+      } catch (e) {
+        console.error("[useRunningOrder] network error", reason, e);
+        setError(
+          e instanceof Error ? e.message : "Failed to load running order",
+        );
+      } finally {
+        inFlightRef.current = false;
+        setIsLoading(false);
+        if (isManual) setIsRefreshing(false);
+      }
+    },
+    [sessionId],
+  );
+
+  const reload = useCallback(() => {
+    void load("manual");
+  }, [load]);
 
   useEffect(() => {
-    if (sessionId === "demo") {
-      setIsLoading(false);
-      return;
-    }
+    void load("mount");
 
-    void loadInitial();
+    const id = window.setInterval(() => {
+      void load("poll");
+    }, POLL_MS);
 
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`running-order-${sessionId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "running_orders",
-          filter: `session_id=eq.${sessionId}`,
-        },
-        () => {
-          void loadInitial();
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "segments",
-        },
-        () => {
-          // Segment rows don't carry session_id — reload latest RO for this session.
-          void loadInitial();
-        },
-      )
-      .subscribe();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void load("focus");
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    // Custom event so other UI can force a timeline refresh after apply
+    const onForce = () => void load("event");
+    window.addEventListener("sudriv:running-order-refresh", onForce);
 
     return () => {
-      void supabase.removeChannel(channel);
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("sudriv:running-order-refresh", onForce);
     };
-  }, [sessionId, loadInitial]);
+  }, [load]);
 
-  return { segments, totalDuration, version, isLoading, reload: loadInitial };
+  return {
+    segments,
+    totalDuration,
+    version,
+    activeSegment,
+    isLoading,
+    isRefreshing,
+    error,
+    lastFetchedAt,
+    reload,
+  };
 }

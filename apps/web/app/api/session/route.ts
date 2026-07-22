@@ -94,25 +94,64 @@ export async function POST(request: Request) {
     }
     console.log("[session/POST] Running order created:", runningOrder.id);
 
-    // 6. Create segments from template
+    // 6. Create segments from template (with start offsets + teleprompter text)
     if (template.default_segments && Array.isArray(template.default_segments)) {
-      const segmentsToInsert = template.default_segments.map((seg: any) => ({
-        running_order_id: runningOrder.id,
-        position: seg.position,
-        title: seg.title,
-        slug: seg.slug || `seg-${seg.position}`,
-        segment_type: seg.segment_type,
-        duration_seconds: seg.duration_seconds,
-        teleprompter_text: seg.teleprompter_text || "",
-        status: "pending"
-      }));
+      const sorted = [...template.default_segments].sort(
+        (a: any, b: any) => (a.position ?? 0) - (b.position ?? 0),
+      );
+      let offset = 0;
+      const segmentsToInsert = sorted.map((seg: any) => {
+        const duration = Number(seg.duration_seconds) || 0;
+        const row = {
+          running_order_id: runningOrder.id,
+          position: seg.position,
+          title: seg.title,
+          slug: seg.slug || `seg-${seg.position}`,
+          segment_type: seg.segment_type || "package",
+          duration_seconds: duration,
+          start_offset_seconds: offset,
+          teleprompter_text:
+            (seg.teleprompter_text || seg.script || "").trim() ||
+            `${seg.title}\n\nयह ${seg.title} सेगमेंट है। एंकर यहाँ स्क्रिप्ट पढ़ेंगे।`,
+          status: "pending",
+        };
+        offset += duration;
+        return row;
+      });
 
-      const { error: segError } = await admin.from("segments").insert(segmentsToInsert);
-      if (segError) {
-        console.error("[session/POST] Segments insert error:", segError.message, segError.details, segError.hint);
-      } else {
-        console.log("[session/POST] Segments created:", segmentsToInsert.length);
+      // Update total duration from computed offsets
+      if (segmentsToInsert.length > 0) {
+        await admin
+          .from("running_orders")
+          .update({ total_duration_seconds: offset })
+          .eq("id", runningOrder.id);
       }
+
+      const { data: insertedSegs, error: segError } = await admin
+        .from("segments")
+        .insert(segmentsToInsert)
+        .select("id, position, title");
+
+      if (segError) {
+        console.error(
+          "[session/POST] Segments insert error:",
+          segError.message,
+          segError.details,
+          segError.hint,
+          segError.code,
+        );
+      } else {
+        console.info("[session/POST] Segments created:", {
+          count: insertedSegs?.length ?? segmentsToInsert.length,
+          ro: runningOrder.id,
+          titles: (insertedSegs ?? []).map((s) => s.title),
+        });
+      }
+    } else {
+      console.warn(
+        "[session/POST] template.default_segments missing or empty",
+        typeof template.default_segments,
+      );
     }
 
     console.log("[session/POST] ✅ Session creation complete:", session.id);

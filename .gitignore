@@ -77,3 +77,8 @@ htmlcov/
 next-env.d.ts
 .vercel
 .supabase/
+.railway/
+*.wav
+apps/agent/scratch/
+apps/web/check-room.js
+package-lock.json

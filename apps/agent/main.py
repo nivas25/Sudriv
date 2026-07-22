@@ -6,14 +6,14 @@ LiveKit Agents 1.6.x worker: one AgentSession per production room.
 Usage:
     uv run python main.py dev
     uv run python main.py start
-
-See: knowledge-base/05-voice-agent-design.md
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -25,6 +25,7 @@ from livekit.agents import (
     WorkerOptions,
     cli,
 )
+from livekit.agents.llm import ChatContext, ChatMessage, StopResponse
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
 from livekit.agents.voice.turn import InterruptionOptions, PreemptiveGenerationOptions
@@ -35,56 +36,83 @@ from agent.session import SessionManager
 
 load_dotenv()
 
+# ── Logging: important only ──────────────────────────────────────────────
+_LOG_LEVEL = os.environ.get("SUDRIV_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
 logger = logging.getLogger("sudriv-agent")
+
+# Mute noisy third-party chatter unless explicitly debugging.
+for _noisy in (
+    "livekit",
+    "livekit.agents",
+    "livekit.plugins",
+    "httpx",
+    "httpcore",
+    "openai",
+    "asyncio",
+    "websockets",
+    "aiohttp",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+# Keep our package visible.
+logging.getLogger("sudriv-agent").setLevel(getattr(logging, _LOG_LEVEL, logging.INFO))
+
+
+# Discard empty / noise-like STT finals so the agent does not reply to silence.
+_NOISE_RE = re.compile(
+    r"^(uh+|um+|ah+|oh+|hmm+|mm+|huh+|ha+|eh+|a+|i+|the|yeah|ok|okay|\.|\,|\?|\!)+$",
+    re.IGNORECASE,
+)
+
+
+class SudrivAgent(Agent):
+    """Agent that ignores empty/garbage user turns."""
+
+    async def on_user_turn_completed(
+        self, turn_ctx: ChatContext, new_message: ChatMessage
+    ) -> None:
+        text = (new_message.text_content or "").strip()
+        if len(text) < 2 or _NOISE_RE.match(text):
+            logger.info("Ignoring empty/noise turn: %r", text)
+            raise StopResponse()
 
 
 async def entrypoint(ctx: JobContext) -> None:
-    """
-    Job lifecycle:
-      connect (audio) → wait for producer → load session →
-      start AgentSession (STT/LLM/TTS on session) → greet → converse
-    """
-    logger.info("Agent joining room: %s", ctx.room.name)
+    logger.info("Joining room %s", ctx.room.name)
 
-    # AUDIO_ONLY: Room connects with auto_subscribe=False then subscribes to
-    # remote audio publications (see livekit.agents.job._apply_auto_subscribe_opts).
-    # Without this, RoomIO never gets mic frames and STT is deaf.
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     participant = await ctx.wait_for_participant()
-    logger.info(
-        "Producer joined identity=%s kind=%s pubs=%s",
-        participant.identity,
-        participant.kind,
-        [
-            (p.sid, p.kind, p.source, p.subscribed)
-            for p in participant.track_publications.values()
-        ],
-    )
+    logger.info("Producer joined: %s", participant.identity)
 
     session_mgr = await SessionManager.from_room(ctx.room)
-    logger.info("Session initialized: %s", session_mgr.session_id)
+    segs = len(session_mgr.running_order.get("segments", []))
+    logger.info("Session %s ready (%d segments)", session_mgr.session_id, segs)
 
     pipeline = build_voice_pipeline(session_mgr)
 
-    # Canonical 1.6 pattern: models live on AgentSession; Agent holds
-    # instructions + tools (+ turn-handling). Empty AgentSession() is wrong.
-    # Production turn-taking: snappy endpointing + fast barge-in.
-    # (LiveKit turns docs: lower min_delay + short min_duration for responsiveness)
+    # Interruption latency:
+    # - mode=vad + min_words=0 → stop on speech energy, do NOT wait for STT words
+    #   (min_words=1 was causing ~1–2s delay before barge-in)
+    # - very low min_duration so barge-in feels immediate
     agent_session = AgentSession(
         vad=ctx.proc.userdata["vad"],
         stt=pipeline.stt,
         llm=pipeline.llm,
         tts=pipeline.tts,
         turn_handling=TurnHandlingOptions(
-            endpointing=EndpointingOptions(min_delay=0.3, max_delay=2.5),
+            endpointing=EndpointingOptions(min_delay=0.4, max_delay=2.5),
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.25,
+                min_duration=0.08,
                 min_words=0,
                 resume_false_interruption=True,
-                false_interruption_timeout=1.2,
+                false_interruption_timeout=1.0,
             ),
             preemptive_generation=PreemptiveGenerationOptions(
                 enabled=True,
@@ -93,34 +121,27 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    agent = Agent(
+    agent = SudrivAgent(
         instructions=pipeline.instructions,
         tools=pipeline.tools,
     )
 
     @agent_session.on("user_input_transcribed")
     def _on_stt(ev) -> None:
-        logger.info(
-            "STT final=%s text=%r lang=%s",
-            ev.is_final,
-            ev.transcript,
-            getattr(ev, "language", None),
-        )
+        if ev.is_final and (ev.transcript or "").strip():
+            logger.info("STT final: %r", ev.transcript)
 
     @agent_session.on("conversation_item_added")
     def _on_item_added(_ev) -> None:
         try:
             asyncio.create_task(session_mgr.sync_context_to_redis(agent.chat_ctx))
         except Exception:
-            logger.exception("Failed to schedule chat context sync")
+            logger.exception("chat context sync failed")
 
     @agent_session.on("error")
     def _on_error(ev) -> None:
-        # Surface STT/LLM/TTS failures that would otherwise look like "deaf agent"
-        logger.error("AgentSession error: %s", ev)
+        logger.error("Session error: %s", ev)
 
-    # RoomIO must deliver mono PCM at the same rate Sarvam STT expects.
-    # Default RoomIO is 24 kHz → would force RecognizeStream sox resampler.
     room_options = RoomOptions(
         participant_identity=participant.identity,
         audio_input=AudioInputOptions(
@@ -143,12 +164,11 @@ async def entrypoint(ctx: JobContext) -> None:
             await room_io.wait_for_ready()
             linked = room_io.linked_participant
             logger.info(
-                "RoomIO ready — listening to %s (STT @ %d Hz)",
+                "Listening to %s",
                 linked.identity if linked else "(none)",
-                PIPELINE_SAMPLE_RATE,
             )
         except Exception:
-            logger.exception("RoomIO wait_for_ready failed")
+            logger.exception("RoomIO not ready")
 
     greeting = session_mgr.build_greeting()
     logger.info("Greeting: %s", greeting)
@@ -156,21 +176,28 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 def prewarm(proc: JobProcess) -> None:
-    """Load Silero VAD once per worker (KB: avoid cold start on first speech)."""
-    # Tuned for PCR: short speech ok, slightly snappy end-of-turn
+    # Snappy speech-onset detection for real-time barge-in.
+    # False triggers are mitigated by push-to-talk (mic off when not held).
     proc.userdata["vad"] = silero.VAD.load(
-        min_speech_duration=0.08,
-        min_silence_duration=0.28,
-        prefix_padding_duration=0.25,
-        activation_threshold=0.45,
+        min_speech_duration=0.05,
+        min_silence_duration=0.35,
+        prefix_padding_duration=0.2,
+        activation_threshold=0.4,
     )
-    logger.info("Worker pre-warmed (Silero VAD)")
+    logger.info("Worker ready (VAD loaded, fast barge-in)")
 
 
 if __name__ == "__main__":
+    # LiveKit health HTTP server (default prod 8081). Railway sets PORT.
+    health_port = int(os.environ.get("PORT") or os.environ.get("AGENT_HTTP_PORT") or "8081")
+
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
+            # Production: INFO logs; health at http://0.0.0.0:{port}/
+            port=health_port,
+            host="0.0.0.0",
+            log_level=os.environ.get("SUDRIV_LOG_LEVEL", "INFO").lower(),
         ),
     )

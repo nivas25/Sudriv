@@ -2,25 +2,24 @@ import type { NextConfig } from "next";
 import path from "path";
 
 const nextConfig: NextConfig = {
-  // Enable React strict mode for development safety
   reactStrictMode: true,
 
-  // Monorepo root (avoids wrong lockfile root inference with apps/web/package-lock.json)
+  // Monorepo: pin file tracing to repo root for Vercel
   outputFileTracingRoot: path.join(__dirname, "../.."),
 
-  // Transpile workspace packages
-  transpilePackages: ["@sudriv/shared", "@sudriv/database"],
+  // Only packages that actually exist in this monorepo (avoid build noise)
+  transpilePackages: [],
 
-  // Environment variable validation at build time
-  env: {
-    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    NEXT_PUBLIC_LIVEKIT_URL: process.env.NEXT_PUBLIC_LIVEKIT_URL,
-  },
-
-  // Image optimization config
   images: {
     remotePatterns: [],
+  },
+
+  // Fail the production build on type/ESLint errors
+  typescript: {
+    ignoreBuildErrors: false,
+  },
+  eslint: {
+    ignoreDuringBuilds: false,
   },
 };
 

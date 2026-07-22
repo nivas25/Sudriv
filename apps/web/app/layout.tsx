@@ -15,10 +15,32 @@ const jakarta = Plus_Jakarta_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Sudriv — AI Co-pilot for News Producers",
+  title: {
+    default: "Sudriv — AI Co-pilot for News Producers",
+    template: "%s · Sudriv",
+  },
   description:
-    "Real-time voice-controlled timeline management for live television news production.",
-  keywords: ["news", "producer", "AI", "voice", "timeline", "teleprompter"],
+    "Real-time voice-controlled running order management for live television news production.",
+  keywords: [
+    "news production",
+    "running order",
+    "voice AI",
+    "teleprompter",
+    "LiveKit",
+    "PCR",
+  ],
+  applicationName: "Sudriv",
+  authors: [{ name: "Sudriv" }],
+  openGraph: {
+    title: "Sudriv — AI Co-pilot for News Producers",
+    description:
+      "Voice-controlled timeline management for live TV news production.",
+    type: "website",
+  },
+  robots: {
+    index: false,
+    follow: false,
+  },
 };
 
 export default function RootLayout({

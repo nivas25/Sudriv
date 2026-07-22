@@ -9,8 +9,7 @@ dependencies = [
     # LiveKit Agents SDK
     "livekit-agents[sarvam]~=1.6",
     "livekit-plugins-silero>=1.0.0",
-    # LLM — Groq
-    "livekit-plugins-openai>=1.0.0", # Groq uses OpenAI-compatible API
+    "livekit-plugins-openai>=1.0.0",
     # Database
     "supabase>=2.0.0",
     # Redis
