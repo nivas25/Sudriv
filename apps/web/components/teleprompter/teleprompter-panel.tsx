@@ -67,18 +67,34 @@ export function TeleprompterPanel({ sessionId }: { sessionId: string }) {
 
     loadActiveSegment();
 
+    // Agent replaces segments via DELETE+INSERT and UPDATEs running_orders —
+    // listen broadly so teleprompter refreshes after apply_timeline_update.
     const channel = supabase
       .channel(`teleprompter-${sessionId}`)
-      .on("postgres_changes", {
-        event: "UPDATE",
-        schema: "public",
-        table: "segments"
-      }, () => {
-        loadActiveSegment();
-      })
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "segments" },
+        () => {
+          loadActiveSegment();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "running_orders",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          loadActiveSegment();
+        },
+      )
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [sessionId]);
 
   const renderScript = () => {

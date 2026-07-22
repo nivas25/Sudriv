@@ -58,7 +58,7 @@ SARVAM_STT_SAMPLE_RATE = 16000
 def create_sarvam_stt(
     *,
     api_key: str | None = None,
-    language: str = "hi-IN",
+    language: str | None = None,
     model: str = "saaras:v3",
     mode: str = "codemix",
     sample_rate: int = SARVAM_STT_SAMPLE_RATE,
@@ -68,14 +68,13 @@ def create_sarvam_stt(
     """
     Build a production Sarvam STT instance for the Sudriv voice pipeline.
 
-    Args:
-        api_key: Sarvam subscription key (defaults to SARVAM_API_KEY).
-        language: BCP-47 code. ``hi-IN`` handles Hindi, English, and Hinglish.
-        model: Prefer ``saaras:v3`` (mode control + Indic languages).
-        mode: ``codemix`` for newsroom Hinglish; use ``transcribe`` for pure single-language.
-        sample_rate: Must match RoomIO capture rate (16 kHz).
-        high_vad_sensitivity: Faster end-of-utterance for conversational agents.
-        flush_signal: Let the plugin finalize buffers when LiveKit VAD ends a turn.
+    Language policy (production):
+      Prefer ``en-IN`` or ``hi-IN`` — NOT ``unknown``.
+      ``unknown`` auto-detect can flip to Kannada/Odia/etc. on short/noisy audio.
+      ``en-IN`` + ``mode=codemix`` is the best default for Indian newsroom EN/Hinglish;
+      use ``hi-IN`` + codemix when the desk is Hindi-primary.
+
+    Override with SARVAM_STT_LANGUAGE / SARVAM_STT_MODE env vars.
     """
     key = api_key or os.environ.get("SARVAM_API_KEY")
     if not key:
@@ -86,23 +85,37 @@ def create_sarvam_stt(
     if sample_rate <= 0:
         raise ValueError("sample_rate must be > 0")
 
+    resolved_language = (
+        language
+        or os.environ.get("SARVAM_STT_LANGUAGE")
+        or "en-IN"
+    )
+    resolved_mode = os.environ.get("SARVAM_STT_MODE") or mode
+
+    # Guard against accidental free-form auto-detect in production.
+    if resolved_language == "unknown":
+        logger.warning(
+            "STT language=unknown can mis-detect regional languages; "
+            "forcing en-IN + codemix for Sudriv production"
+        )
+        resolved_language = "en-IN"
+        resolved_mode = "codemix"
+
     stt = sarvam.STT(
         api_key=key,
-        language=language,
+        language=resolved_language,
         model=model,
-        mode=mode,
+        mode=resolved_mode,
         sample_rate=sample_rate,
         high_vad_sensitivity=high_vad_sensitivity,
         flush_signal=flush_signal,
-        # Leave input_audio_codec unset so the official plugin uses its default
-        # audio/wav streaming path (validated by LiveKit for this SDK version).
     )
 
     logger.info(
         "Sarvam STT ready model=%s language=%s mode=%s sample_rate=%d",
         model,
-        language,
-        mode,
+        resolved_language,
+        resolved_mode,
         sample_rate,
     )
     return stt

@@ -134,29 +134,65 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     if (!room) return;
 
+    /**
+     * Coalesce streaming STT finals into one bubble per speaker turn.
+     * Without this, each final fragment becomes a separate chat message.
+     */
     const handleTranscription = (
       segments: TranscriptionSegment[],
       participant: { identity?: string } | undefined,
     ) => {
       for (const segment of segments) {
-        if (!segment.final || !segment.text?.trim()) continue;
+        // Skip empty / pure interim noise. Prefer final; allow non-final only
+        // to update the last same-role bubble (live typing feel).
+        const text = segment.text?.trim();
+        if (!text) continue;
 
-        const isProducer = participant?.identity?.startsWith("producer");
+        const isProducer = Boolean(participant?.identity?.startsWith("producer"));
         const role: "human" | "ai" = isProducer ? "human" : "ai";
 
+        // Ignore agent interim fragments — agent TTS captions often spam.
+        if (role === "ai" && !segment.final) continue;
+
         setMessages((prev) => {
-          const existing = prev.find((m) => m.id === segment.id);
-          if (existing) {
-            return prev.map((m) =>
-              m.id === segment.id ? { ...m, text: segment.text } : m,
-            );
+          const byId = prev.findIndex((m) => m.id === segment.id);
+          if (byId >= 0) {
+            const next = [...prev];
+            next[byId] = { ...next[byId], text };
+            return next;
           }
+
+          const last = prev[prev.length - 1];
+          const sameTurn =
+            last &&
+            last.role === role &&
+            Date.now() - last.timestamp.getTime() < 8000;
+
+          if (sameTurn) {
+            // Prefer longer replacement (STT often rewrites the whole phrase),
+            // otherwise append unique tails.
+            let nextText = text;
+            if (text.startsWith(last.text)) {
+              nextText = text;
+            } else if (last.text.startsWith(text)) {
+              nextText = last.text;
+            } else if (!last.text.includes(text)) {
+              nextText = `${last.text} ${text}`.replace(/\s+/g, " ").trim();
+            } else {
+              nextText = last.text;
+            }
+            return [
+              ...prev.slice(0, -1),
+              { ...last, id: segment.id, text: nextText, timestamp: new Date() },
+            ];
+          }
+
           return [
             ...prev,
             {
               id: segment.id,
               role,
-              text: segment.text,
+              text,
               timestamp: new Date(),
             },
           ];

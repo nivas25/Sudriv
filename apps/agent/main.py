@@ -69,20 +69,27 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Canonical 1.6 pattern: models live on AgentSession; Agent holds
     # instructions + tools (+ turn-handling). Empty AgentSession() is wrong.
+    # Production turn-taking: snappy endpointing + fast barge-in.
+    # (LiveKit turns docs: lower min_delay + short min_duration for responsiveness)
     agent_session = AgentSession(
         vad=ctx.proc.userdata["vad"],
         stt=pipeline.stt,
         llm=pipeline.llm,
         tts=pipeline.tts,
-        # PCR-oriented turn handling (KB: ~0.5s endpointing, interruptible)
         turn_handling=TurnHandlingOptions(
-            endpointing=EndpointingOptions(min_delay=0.4),
+            endpointing=EndpointingOptions(min_delay=0.3, max_delay=2.5),
             interruption=InterruptionOptions(
                 enabled=True,
-                min_duration=0.4,
-                min_words=1,
+                mode="vad",
+                min_duration=0.25,
+                min_words=0,
+                resume_false_interruption=True,
+                false_interruption_timeout=1.2,
             ),
-            preemptive_generation=PreemptiveGenerationOptions(enabled=True),
+            preemptive_generation=PreemptiveGenerationOptions(
+                enabled=True,
+                preemptive_tts=True,
+            ),
         ),
     )
 
@@ -152,10 +159,10 @@ def prewarm(proc: JobProcess) -> None:
     """Load Silero VAD once per worker (KB: avoid cold start on first speech)."""
     # Tuned for PCR: short speech ok, slightly snappy end-of-turn
     proc.userdata["vad"] = silero.VAD.load(
-        min_speech_duration=0.1,
-        min_silence_duration=0.35,
-        prefix_padding_duration=0.3,
-        activation_threshold=0.5,
+        min_speech_duration=0.08,
+        min_silence_duration=0.28,
+        prefix_padding_duration=0.25,
+        activation_threshold=0.45,
     )
     logger.info("Worker pre-warmed (Silero VAD)")
 

@@ -48,10 +48,10 @@ def build_voice_pipeline(session: SessionManager) -> VoicePipeline:
     if not sarvam_api_key:
         raise ValueError("SARVAM_API_KEY is required for STT/TTS. Set apps/agent/.env")
 
-    # Language: auto-detect + codemix so EN / HI / Hinglish all work.
+    # en-IN + codemix: English / Hindi / Hinglish without free-form auto-detect.
     stt_instance = create_sarvam_stt(
         api_key=sarvam_api_key,
-        language="unknown",
+        language="en-IN",
         model="saaras:v3",
         mode="codemix",
         sample_rate=PIPELINE_SAMPLE_RATE,
@@ -59,27 +59,18 @@ def build_voice_pipeline(session: SessionManager) -> VoicePipeline:
         flush_signal=True,
     )
 
-    # Official LiveKit OpenAI plugin — no Groq.
     llm_instance = create_conversation_llm()
 
-    tts_instance = create_sarvam_tts(
-        api_key=sarvam_api_key,
-        model="bulbul:v3",
-        speaker="ritu",
-        target_language_code="en-IN",  # bilingual-capable; prompt controls spoken language
-        speech_sample_rate=22050,
-        pace=1.1,
-        min_buffer_size=40,
-        max_chunk_length=120,
-    )
+    # Production voice: priya @ 24kHz / 192k (see sarvam_tts defaults).
+    tts_instance = create_sarvam_tts(api_key=sarvam_api_key)
 
     toolkit = SudrivToolkit(session=session)
     agent_tools = llm.find_function_tools(toolkit)
     instructions = build_system_prompt(session)
 
     logger.info(
-        "Pipeline ready: STT=saaras:v3/codemix/unknown | LLM=openai/%s | "
-        "prompt_chars=%d | TTS=bulbul:v3",
+        "Pipeline ready: STT=saaras:v3/codemix/en-IN | LLM=openai/%s | "
+        "prompt_chars=%d | TTS=bulbul:v3/priya@24k",
         OPENAI_MODEL,
         len(instructions),
     )

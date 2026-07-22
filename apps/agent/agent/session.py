@@ -305,11 +305,10 @@ class SessionManager:
             )
 
         return (
-            f"Namaste! I'm your Sudriv co-pilot. "
-            f"I've loaded the running order with "
-            f"{len(segments)} segments, total duration {total_mins} minutes. "
-            f"I have {news_count} news items ready. "
-            f"How would you like to begin?"
+            f"Hi — Sudriv co-pilot here. "
+            f"Running order is loaded: {len(segments)} segments, "
+            f"{total_mins} minutes, {news_count} news items ready. "
+            f"What would you like to do first?"
         )
 
     async def update_running_order(self, new_order: dict[str, Any]) -> None:
@@ -342,10 +341,9 @@ class SessionManager:
                     return
                 ro_id = ro_result.data[0]["id"]
                 
-                # Delete old segments
+                # Delete old segments then insert full new set (fires realtime INSERT).
                 supabase.table("segments").delete().eq("running_order_id", ro_id).execute()
-                
-                # Insert new segments
+
                 segments = new_order.get("segments", [])
                 if segments:
                     inserts = []
@@ -357,10 +355,19 @@ class SessionManager:
                             "slug": seg.get("slug", f"seg-{seg['position']}"),
                             "segment_type": seg.get("segment_type", "package"),
                             "duration_seconds": seg["duration_seconds"],
+                            "start_offset_seconds": seg.get("start_offset_seconds", 0),
                             "teleprompter_text": seg.get("teleprompter_text", ""),
-                            "status": seg.get("status", "pending")
+                            "status": seg.get("status", "pending"),
+                            "news_item_id": seg.get("news_item_id"),
                         })
                     supabase.table("segments").insert(inserts).execute()
+                # Touch running_orders so UPDATE realtime subscribers refresh.
+                supabase.table("running_orders").update(
+                    {
+                        "version": version,
+                        "total_duration_seconds": new_order.get("total_duration_seconds", 0),
+                    }
+                ).eq("id", ro_id).execute()
             except Exception as e:
                 logger.error(f"Failed to update running order in Supabase: {e}")
                 
