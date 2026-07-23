@@ -1,1 +1,1 @@
-web: uv run python main.py start
+worker: uv run python main.py start
