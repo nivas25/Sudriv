@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-// import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { redis } from "@/lib/redis/client";
+import { RoomServiceClient } from "livekit-server-sdk";
+import { roomNameForSession } from "@/lib/livekit/config";
 
 /**
  * GET    /api/session/[id] — Get session details
@@ -37,17 +40,48 @@ export async function POST(
     const { action } = await request.json();
 
     if (action === "end") {
-      // TODO: Implement session end
-      // 1. Update session status to "ended"
-      // 2. Delete LiveKit room
-      // 3. Clear Redis cache (running_order, pending_proposal, agent_context, lock)
-      // 4. Log session_ended event
-      // 5. Generate and return session summary
+      const admin = createAdminClient();
 
-      return NextResponse.json(
-        { error: "Not implemented", sessionId },
-        { status: 501 }
+      // 1. Update session status to "ended"
+      await admin
+        .from("sessions")
+        .update({ status: "ended", ended_at: new Date().toISOString() })
+        .eq("id", sessionId);
+
+      // 2. Delete LiveKit room to kill agent workers
+      const roomName = roomNameForSession(sessionId);
+      const roomService = new RoomServiceClient(
+        process.env.LIVEKIT_URL!,
+        process.env.LIVEKIT_API_KEY!,
+        process.env.LIVEKIT_API_SECRET!
       );
+      
+      try {
+        await roomService.deleteRoom(roomName);
+        console.log(`[session/end] Deleted LiveKit room: ${roomName}`);
+      } catch (err: any) {
+        // Room might already be deleted or empty, that's fine
+        console.log(`[session/end] Room delete skipped/failed: ${err.message}`);
+      }
+
+      // 3. Clear Redis cache
+      await redis.del(
+        `running_order:${sessionId}`,
+        `proposal:${sessionId}`,
+        `chat_context:${sessionId}`,
+        `session:${sessionId}:lock`
+      );
+      console.log(`[session/end] Cleared Redis cache for session: ${sessionId}`);
+
+      // 4. Log session_ended event
+      await admin.from("session_events").insert({
+        session_id: sessionId,
+        event_type: "session_ended",
+        payload: { ended_at: new Date().toISOString(), reason: "user_action" },
+        source: "system",
+      });
+
+      return NextResponse.json({ status: "ended", sessionId });
     }
 
     return NextResponse.json(

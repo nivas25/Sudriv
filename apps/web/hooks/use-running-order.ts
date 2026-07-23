@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 export type RunningOrderSegment = {
   id: string;
@@ -27,15 +28,13 @@ type RunningOrderPayload = {
   error?: string;
 };
 
-const POLL_MS = 1200;
+// We use Supabase realtime, so no fast polling needed
+const POLL_MS = 30000; // Background slow poll as fallback
 
 /**
- * Live running order — Redis-backed API + poll + manual refresh.
+ * Live running order — Redis-backed API + Realtime.
  *
- * Realtime was removed: Timeline / Teleprompter / Metadata each call this
- * hook, and Supabase reuses channel names → second mount hits
- * "cannot add postgres_changes callbacks after subscribe()".
- * Agent writes Redis first; the API prefers Redis, so poll is enough.
+ * Realtime is fixed by using unique channel names to avoid remount errors.
  */
 export function useRunningOrder(sessionId: string) {
   const [segments, setSegments] = useState<RunningOrderSegment[]>([]);
@@ -158,13 +157,33 @@ export function useRunningOrder(sessionId: string) {
     const onForce = () => void load("event");
     window.addEventListener("sudriv:running-order-refresh", onForce);
 
+    const supabase = createClient();
+    const channelName = `ro-updates-${sessionId}-${Math.random().toString(36).substring(2, 9)}`;
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "running_orders",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          console.info("[useRunningOrder] Realtime update received");
+          void load("realtime");
+        }
+      )
+      .subscribe();
+
     return () => {
       mountedRef.current = false;
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("sudriv:running-order-refresh", onForce);
+      supabase.removeChannel(channel);
     };
-  }, [load]);
+  }, [load, sessionId]);
 
   return {
     segments,

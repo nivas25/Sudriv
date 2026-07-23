@@ -197,6 +197,10 @@ class SudrivToolkit:
         affected = []
         new_segments = [s.copy() for s in segments]  # Deep copy
         
+        # Map common hallucinations
+        if action in ("add", "append"):
+            action = "insert"
+            
         if action == "insert":
             if not new_title or not new_duration:
                 raise ValueError("Insert requires new_segment_title and new_segment_duration_seconds")
@@ -310,6 +314,8 @@ class SudrivToolkit:
                         "new_duration": new_duration,
                     })
                     break
+        else:
+            raise ValueError(f"Unknown action: {action}. Use 'insert', 'remove', 'reorder', or 'modify_duration'")
         
         # Recalculate start offsets
         new_segments.sort(key=lambda s: s["position"])

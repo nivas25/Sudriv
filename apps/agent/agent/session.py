@@ -356,9 +356,26 @@ class SessionManager:
         total_dur = new_order.get("total_duration_seconds", 0)
         logger.info("Running order → v%s (%d segs)", version, len(new_order.get("segments", [])))
 
+        # Write Redis first (frontend polls this path) — include version explicitly
         try:
             redis = redis_client()
-            await redis.set(f"running_order:{self.session_id}", json.dumps(new_order))
+            payload = {
+                **new_order,
+                "session_id": self.session_id,
+                "version": version,
+                "total_duration_seconds": total_dur,
+                "segments": new_order.get("segments", []),
+            }
+            await redis.set(
+                f"running_order:{self.session_id}",
+                json.dumps(payload, default=str),
+            )
+            logger.info(
+                "Redis RO written session=%s v%s segs=%d",
+                self.session_id[:8],
+                version,
+                len(payload["segments"]),
+            )
         except Exception as e:
             logger.error("Failed to update running order in Redis: %s", e)
 
@@ -388,6 +405,7 @@ class SessionManager:
                 inserts = []
                 for seg in segments:
                     row = {
+                        "id": seg["id"],
                         "running_order_id": ro_id,
                         "position": seg["position"],
                         "title": seg["title"],

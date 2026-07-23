@@ -70,6 +70,7 @@ export function Header() {
       const data = await res.json();
       if (data.sessionId) {
         router.push(`/session/${data.sessionId}`);
+        setStarting(false);
       } else {
         console.error("Failed to start session", data.error);
         setStarting(false);
@@ -139,7 +140,21 @@ export function Header() {
           
           {isSessionActive ? (
             <button 
-              onClick={() => router.push("/dashboard")}
+              onClick={async () => {
+                // Extract session ID from the pathname /session/[id]
+                const sessionId = pathname?.split("/").pop();
+                if (sessionId) {
+                  try {
+                    await fetch(`/api/session/${sessionId}`, {
+                      method: "POST",
+                      body: JSON.stringify({ action: "end" }),
+                    });
+                  } catch (e) {
+                    console.error("End session failed", e);
+                  }
+                }
+                router.push("/dashboard");
+              }}
               className="group flex items-center gap-1.5 sm:gap-2 px-4 sm:px-6 py-2 sm:py-2.5 bg-gray-900 text-white rounded-lg text-xs sm:text-sm font-bold tracking-wide transition-all shadow-sm hover:bg-gray-800"
             >
               <Square className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-current group-hover:scale-110 transition-transform" />
