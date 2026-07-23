@@ -26,7 +26,6 @@ logger = logging.getLogger("sudriv-agent.llm_clients")
 # Main voice + tool-routing model (fast, stable, good function calling).
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
-# Short Hindi turns — room for a warm phrase without rambling.
 MAX_COMPLETION_TOKENS = int(os.environ.get("OPENAI_MAX_COMPLETION_TOKENS", "160"))
 
 
@@ -55,8 +54,7 @@ def create_conversation_llm() -> lk_openai.LLM:
     return lk_openai.LLM(
         model=OPENAI_MODEL,
         api_key=key,
-        # Slightly warmer than pure-strict; still reliable for tools
-        temperature=0.35,
+        temperature=0.3,
         max_completion_tokens=MAX_COMPLETION_TOKENS,
         top_p=0.9,
     )

@@ -20,12 +20,23 @@ type SegmentRow = {
   news_item_id?: string | null;
 };
 
+type RoPayload = {
+  sessionId: string;
+  runningOrderId: string | null;
+  version: number;
+  totalDurationSeconds: number;
+  segments: SegmentRow[];
+  activeSegment: SegmentRow | null;
+  source: string;
+};
+
 function noStoreJson(body: unknown, status = 200) {
   return NextResponse.json(body, {
     status,
     headers: {
       "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
       Pragma: "no-cache",
+      "CDN-Cache-Control": "no-store",
     },
   });
 }
@@ -47,11 +58,63 @@ function normalizeSegments(raw: unknown[]): SegmentRow[] {
     .sort((a, b) => a.position - b.position);
 }
 
+function asPayload(
+  sessionId: string,
+  version: number,
+  total: number,
+  segs: SegmentRow[],
+  source: string,
+  runningOrderId: string | null = null,
+): RoPayload {
+  return {
+    sessionId,
+    runningOrderId,
+    version,
+    totalDurationSeconds: total,
+    segments: segs,
+    activeSegment:
+      segs.find((s) => s.status === "on_air") ??
+      segs.find((s) => s.status === "pending") ??
+      segs[0] ??
+      null,
+    source,
+  };
+}
+
+async function readRedisRo(sessionId: string): Promise<RoPayload | null> {
+  try {
+    let cached = await redis.get<unknown>(`running_order:${sessionId}`);
+    if (!cached) return null;
+    // Upstash may return object or JSON string depending on write path
+    if (typeof cached === "string") {
+      try {
+        cached = JSON.parse(cached);
+      } catch {
+        return null;
+      }
+    }
+    if (!cached || typeof cached !== "object") return null;
+    const obj = cached as Record<string, unknown>;
+    const segs = normalizeSegments(
+      Array.isArray(obj.segments) ? obj.segments : [],
+    );
+    const version = Number(obj.version) || 0;
+    if (segs.length === 0 && version === 0) return null;
+    const total =
+      Number(obj.total_duration_seconds) ||
+      segs.reduce((n, s) => n + (s.duration_seconds || 0), 0);
+    return asPayload(sessionId, version, total, segs, "redis");
+  } catch (e) {
+    console.warn(
+      "[running-order] redis:",
+      e instanceof Error ? e.message : e,
+    );
+    return null;
+  }
+}
+
 /**
- * GET /api/session/[id]/running-order
- *
- * Prefer agent Redis cache (written immediately on apply), then Supabase.
- * This is why the timeline lagged: agent updated Redis first, UI only read DB.
+ * Prefer the *newer* of Redis (agent hot cache) vs Supabase.
  */
 export async function GET(
   _request: Request,
@@ -85,51 +148,9 @@ export async function GET(
       return noStoreJson({ error: "Forbidden" }, 403);
     }
 
-    // ── 1) Agent hot path: Redis ──────────────────────────────────────────
-    // Key written by apps/agent SessionManager.update_running_order
-    try {
-      const cached = await redis.get<Record<string, unknown>>(
-        `running_order:${sessionId}`,
-      );
-      if (cached && typeof cached === "object") {
-        const segs = normalizeSegments(
-          Array.isArray(cached.segments) ? cached.segments : [],
-        );
-        const version = Number(cached.version) || 0;
-        if (segs.length > 0 || version > 0) {
-          const total =
-            Number(cached.total_duration_seconds) ||
-            segs.reduce((n, s) => n + (s.duration_seconds || 0), 0);
+    const redisRo = await readRedisRo(sessionId);
 
-          console.info("[running-order] redis hit", {
-            sessionId: sessionId.slice(0, 8),
-            version,
-            segments: segs.length,
-          });
-
-          return noStoreJson({
-            sessionId,
-            runningOrderId: null,
-            version,
-            totalDurationSeconds: total,
-            segments: segs,
-            activeSegment:
-              segs.find((s) => s.status === "on_air") ??
-              segs.find((s) => s.status === "pending") ??
-              segs[0] ??
-              null,
-            source: "redis",
-          });
-        }
-      }
-    } catch (redisErr) {
-      console.warn(
-        "[running-order] redis read skipped:",
-        redisErr instanceof Error ? redisErr.message : redisErr,
-      );
-    }
-
-    // ── 2) Supabase source of truth ───────────────────────────────────────
+    // Supabase always (for version compare + fallback)
     const { data: roRows, error: roError } = await admin
       .from("running_orders")
       .select("id, session_id, version, total_duration_seconds, created_at")
@@ -138,73 +159,85 @@ export async function GET(
       .limit(5);
 
     if (roError) {
+      if (redisRo) return noStoreJson(redisRo);
       return noStoreJson({ error: roError.message }, 500);
     }
 
     const ro = roRows?.[0] ?? null;
-    if (!ro) {
-      return noStoreJson({
-        sessionId,
-        runningOrderId: null,
-        version: 0,
-        totalDurationSeconds: 0,
-        segments: [],
-        activeSegment: null,
-        source: "supabase",
-      });
-    }
+    let dbRo: RoPayload | null = null;
 
-    let { data: segments, error: segError } = await admin
-      .from("segments")
-      .select(
-        "id, running_order_id, position, title, slug, segment_type, duration_seconds, start_offset_seconds, teleprompter_text, status, news_item_id",
-      )
-      .eq("running_order_id", ro.id)
-      .order("position", { ascending: true });
+    if (ro) {
+      let { data: segments, error: segError } = await admin
+        .from("segments")
+        .select(
+          "id, running_order_id, position, title, slug, segment_type, duration_seconds, start_offset_seconds, teleprompter_text, status, news_item_id",
+        )
+        .eq("running_order_id", ro.id)
+        .order("position", { ascending: true });
 
-    if (segError) {
-      return noStoreJson({ error: segError.message }, 500);
-    }
+      if (segError) {
+        if (redisRo) return noStoreJson(redisRo);
+        return noStoreJson({ error: segError.message }, 500);
+      }
 
-    // If latest RO is empty mid-rewrite, fall back to a previous version
-    if ((!segments || segments.length === 0) && roRows && roRows.length > 1) {
-      for (const candidate of roRows.slice(1)) {
-        const { data: altSegs } = await admin
-          .from("segments")
-          .select(
-            "id, running_order_id, position, title, slug, segment_type, duration_seconds, start_offset_seconds, teleprompter_text, status, news_item_id",
-          )
-          .eq("running_order_id", candidate.id)
-          .order("position", { ascending: true });
-        if (altSegs && altSegs.length > 0) {
-          segments = altSegs;
-          break;
+      if ((!segments || segments.length === 0) && roRows && roRows.length > 1) {
+        for (const candidate of roRows.slice(1)) {
+          const { data: altSegs } = await admin
+            .from("segments")
+            .select(
+              "id, running_order_id, position, title, slug, segment_type, duration_seconds, start_offset_seconds, teleprompter_text, status, news_item_id",
+            )
+            .eq("running_order_id", candidate.id)
+            .order("position", { ascending: true });
+          if (altSegs && altSegs.length > 0) {
+            segments = altSegs;
+            break;
+          }
         }
       }
+
+      const list = normalizeSegments(segments ?? []);
+      dbRo = asPayload(
+        sessionId,
+        ro.version ?? 0,
+        ro.total_duration_seconds ?? 0,
+        list,
+        "supabase",
+        ro.id,
+      );
     }
 
-    const list = normalizeSegments(segments ?? []);
+    // Pick newer version; prefer Redis on tie (agent just wrote it)
+    let chosen: RoPayload | null = null;
+    if (redisRo && dbRo) {
+      chosen =
+        redisRo.version > dbRo.version
+          ? redisRo
+          : redisRo.version < dbRo.version
+            ? dbRo
+            : redisRo.segments.length >= dbRo.segments.length
+              ? redisRo
+              : dbRo;
+    } else {
+      chosen = redisRo ?? dbRo;
+    }
 
-    console.info("[running-order] supabase", {
+    if (!chosen) {
+      return noStoreJson(
+        asPayload(sessionId, 0, 0, [], "empty"),
+      );
+    }
+
+    console.info("[running-order] ok", {
       sessionId: sessionId.slice(0, 8),
-      roId: ro.id.slice(0, 8),
-      version: ro.version,
-      segments: list.length,
+      source: chosen.source,
+      version: chosen.version,
+      segments: chosen.segments.length,
+      redisV: redisRo?.version ?? null,
+      dbV: dbRo?.version ?? null,
     });
 
-    return noStoreJson({
-      sessionId,
-      runningOrderId: ro.id,
-      version: ro.version,
-      totalDurationSeconds: ro.total_duration_seconds ?? 0,
-      segments: list,
-      activeSegment:
-        list.find((s) => s.status === "on_air") ??
-        list.find((s) => s.status === "pending") ??
-        list[0] ??
-        null,
-      source: "supabase",
-    });
+    return noStoreJson(chosen);
   } catch (e) {
     console.error("[running-order] unexpected", e);
     return noStoreJson({ error: "Internal server error" }, 500);

@@ -83,6 +83,27 @@ class SudrivAgent(Agent):
             raise StopResponse()
 
 
+def _pick_producer(room) -> object | None:
+    """Prefer producer-* STANDARD remote; fall back to any non-agent remote."""
+    remotes = list(room.remote_participants.values())
+    if not remotes:
+        return None
+    producers = [
+        p
+        for p in remotes
+        if (getattr(p, "identity", None) or "").startswith("producer")
+    ]
+    if producers:
+        return producers[0]
+    # Skip other agents if any show up as remote
+    humans = [
+        p
+        for p in remotes
+        if not (getattr(p, "identity", None) or "").lower().startswith("agent")
+    ]
+    return humans[0] if humans else remotes[0]
+
+
 async def entrypoint(ctx: JobContext) -> None:
     logger.info("Joining room %s", ctx.room.name)
 
@@ -96,9 +117,37 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(_on_shutdown)
 
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    logger.info(
+        "Connected room=%s remotes=%s",
+        ctx.room.name,
+        [getattr(p, "identity", "?") for p in ctx.room.remote_participants.values()]
+        or "[]",
+    )
 
-    participant = await ctx.wait_for_participant()
-    logger.info("Producer joined: %s", participant.identity)
+    # Producer may already be in the room (or still connecting). Do not crash the
+    # job if the room drops while waiting (common on browser remount / token race).
+    participant = _pick_producer(ctx.room)
+    if participant is None:
+        try:
+            participant = await ctx.wait_for_participant()
+        except RuntimeError as e:
+            # livekit: "room disconnected while waiting for participant"
+            logger.warning(
+                "Stopped waiting for producer room=%s: %s "
+                "(producer left or page remounted — job will end cleanly)",
+                ctx.room.name,
+                e,
+            )
+            return
+        except Exception:
+            logger.exception("wait_for_participant failed room=%s", ctx.room.name)
+            return
+
+    if participant is None:
+        logger.warning("No producer in room %s — exiting job", ctx.room.name)
+        return
+
+    logger.info("Producer joined: %s", getattr(participant, "identity", participant))
 
     session_mgr = await SessionManager.from_room(ctx.room)
     segs = len(session_mgr.running_order.get("segments", []))
@@ -109,10 +158,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # Sarvam STT/TTS WS can need >10s under concurrent connect (default API timeout).
     _api_conn = APIConnectOptions(max_retry=3, timeout=30.0, retry_interval=1.5)
 
-    # Interruption latency (from working 7f7ca21):
-    # - mode=vad + min_words=0 → stop on speech energy, do NOT wait for STT words
-    # - low min_duration for barge-in; resume_false_interruption keeps speech smooth
-    # - PTT (mic off unless held) prevents false barge-ins from room noise
+    # Stable turn-taking (working stack):
+    # - VAD barge-in with resume on false interrupt (smooth speech)
+    # - min_duration 0.15: still snappy under PTT, fewer choppy self-cuts
+    # - preemptive LLM on, preemptive TTS off → less audio glitching
     agent_session = AgentSession(
         vad=ctx.proc.userdata["vad"],
         stt=pipeline.stt,
@@ -127,14 +176,14 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.08,
+                min_duration=0.15,
                 min_words=0,
                 resume_false_interruption=True,
                 false_interruption_timeout=1.0,
             ),
             preemptive_generation=PreemptiveGenerationOptions(
                 enabled=True,
-                preemptive_tts=True,
+                preemptive_tts=False,
             ),
         ),
     )
