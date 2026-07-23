@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Outfit, Plus_Jakarta_Sans } from "next/font/google";
+import { Outfit, Plus_Jakarta_Sans, Mukta } from "next/font/google";
 import "./globals.css";
 
 const outfit = Outfit({
@@ -11,6 +11,13 @@ const outfit = Outfit({
 const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-sans",
+  display: "swap",
+});
+
+const mukta = Mukta({
+  subsets: ["devanagari", "latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-hindi",
   display: "swap",
 });
 
@@ -50,7 +57,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${jakarta.variable} ${outfit.variable} font-sans antialiased selection:bg-primary/20 selection:text-primary`}>
+      <body className={`${jakarta.variable} ${outfit.variable} ${mukta.variable} font-sans antialiased selection:bg-primary/20 selection:text-primary`}>
         {/* TODO: Add global providers (theme, toast, etc.) */}
         {children}
       </body>

@@ -12,9 +12,6 @@ export default function DashboardPage() {
         <h1 className="text-3xl font-heading font-extrabold tracking-tight text-gray-900">
           Running Order Overview
         </h1>
-        <p className="text-gray-500 font-sans text-base max-w-2xl">
-          Review and prepare your segments before initializing the live production control session.
-        </p>
       </div>
       
       <RunningOrder />

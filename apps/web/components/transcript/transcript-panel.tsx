@@ -10,7 +10,10 @@ import {
   Loader2,
   Volume2,
   AlertCircle,
+  BrainCircuit,
+  Ear,
 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   useRoomContext,
   useConnectionState,
@@ -48,17 +51,26 @@ function TranscriptPanelDisconnected() {
   return (
     <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden">
       <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-1">
           <MessageSquare className="w-5 h-5 text-gray-400" />
           <h2 className="font-heading font-bold text-lg text-gray-900 tracking-tight">
-            AI Copilot Feed
+            AI Director Feed
           </h2>
         </div>
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-sm bg-amber-500 shadow-sm">
-          <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-          <span className="text-[10px] font-bold text-white uppercase tracking-widest">
-            Connecting…
-          </span>
+        
+        <div className="flex-1 flex justify-center">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border bg-amber-50 border-amber-200 text-amber-700 shadow-sm">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">
+              Connecting
+            </span>
+          </div>
+        </div>
+
+        <div className="flex-1 flex justify-end">
+          <div className="flex items-center justify-center w-8 h-8 rounded-md bg-gray-100 text-gray-400">
+            <MicOff className="w-4 h-4" />
+          </div>
         </div>
       </div>
       <div className="flex-1 flex flex-col items-center justify-center gap-4">
@@ -276,23 +288,53 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
   return (
     <div className="flex flex-col h-full bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden select-none">
       <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100 bg-white">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-1">
           <MessageSquare className="w-5 h-5 text-gray-400" />
           <h2 className="font-heading font-bold text-lg text-gray-900 tracking-tight">
-            AI Copilot Feed
+            AI Director Feed
           </h2>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest hidden sm:inline">
-            {agentLabel}
-          </span>
+        
+        {/* Centered Agent Status */}
+        <div className="flex-1 flex justify-center">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={agentState}
+              initial={{ y: -15, opacity: 0, scale: 0.8 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 15, opacity: 0, scale: 0.8 }}
+              transition={{ type: "spring", stiffness: 400, damping: 25 }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full border shadow-sm ${
+                agentState === "listening"
+                  ? "bg-blue-600 border-blue-600 text-white shadow-blue-600/20"
+                  : agentState === "thinking"
+                    ? "bg-purple-600 border-purple-600 text-white shadow-purple-600/20"
+                    : agentState === "speaking"
+                      ? "bg-emerald-600 border-emerald-600 text-white shadow-emerald-600/20"
+                      : "bg-gray-100 border-gray-200 text-gray-500 shadow-none"
+              }`}
+            >
+              {agentState === "listening" ? <Ear className="w-3.5 h-3.5 animate-pulse" /> : 
+               agentState === "thinking" ? <BrainCircuit className="w-3.5 h-3.5 animate-[spin_3s_linear_infinite]" /> : 
+               agentState === "speaking" ? <Volume2 className="w-3.5 h-3.5 animate-pulse" /> : 
+               <Loader2 className="w-3.5 h-3.5" />}
+              <span className="text-[10px] font-bold uppercase tracking-widest">
+                {agentLabel}
+              </span>
+            </motion.div>
+          </AnimatePresence>
+        </div>
+
+        {/* Right side: Mic indicator small box */}
+        <div className="flex-1 flex justify-end">
           <div
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-sm ${statusColor} shadow-sm`}
+            className={`flex items-center justify-center w-8 h-8 rounded-md transition-colors ${
+              holding 
+                ? "bg-emerald-500 text-white shadow-[0_0_10px_rgba(16,185,129,0.4)]" 
+                : "bg-gray-100 text-gray-400"
+            }`}
           >
-            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-            <span className="text-[10px] font-bold text-white uppercase tracking-widest">
-              {statusText}
-            </span>
+            {holding ? <Mic className="w-4 h-4 animate-pulse" /> : <MicOff className="w-4 h-4" />}
           </div>
         </div>
       </div>
@@ -340,19 +382,20 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
           messages.map((msg) => (
             <div
               key={msg.id}
-              className={`flex ${msg.role === "human" ? "justify-end" : "justify-start"}`}
+              className={`flex w-full ${msg.role === "human" ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`flex gap-4 max-w-[85%] ${
+                className={`flex gap-3 max-w-[85%] ${
                   msg.role === "human" ? "flex-row-reverse" : "flex-row"
                 }`}
               >
-                <div className="flex-shrink-0">
+                {/* Avatar */}
+                <div className="flex-shrink-0 mt-4">
                   <div
-                    className={`w-8 h-8 flex items-center justify-center rounded-sm border-2 ${
+                    className={`w-8 h-8 flex items-center justify-center rounded-full shadow-sm ${
                       msg.role === "human"
-                        ? "bg-primary text-white border-primary shadow-sm"
-                        : "bg-gray-900 text-white border-gray-900 shadow-sm"
+                        ? "bg-primary text-white"
+                        : "bg-gray-900 text-white ring-4 ring-gray-50"
                     }`}
                   >
                     {msg.role === "human" ? (
@@ -362,22 +405,27 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
                     )}
                   </div>
                 </div>
+                
+                {/* Message Content */}
                 <div
                   className={`flex flex-col ${
                     msg.role === "human" ? "items-end" : "items-start"
                   }`}
                 >
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1.5 px-1">
                     {msg.role === "human" ? "Producer" : "Sudriv AI"}
                   </span>
+                  
                   <div
-                    className={`px-5 py-3.5 border shadow-sm ${
+                    className={`px-5 py-3.5 ${
                       msg.role === "human"
-                        ? "bg-white border-primary/20 text-gray-900 rounded-2xl rounded-tr-sm"
-                        : "bg-white border-gray-200 text-gray-900 rounded-2xl rounded-tl-sm"
+                        ? "bg-gray-900 text-white rounded-[20px] rounded-tr-[4px]"
+                        : "bg-gray-100 text-gray-900 rounded-[20px] rounded-tl-[4px]"
                     }`}
                   >
-                    <p className="text-sm font-medium leading-relaxed">{msg.text}</p>
+                    <p className="font-hindi text-[15px] font-medium leading-relaxed tracking-wide">
+                      {msg.text}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -387,8 +435,8 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
       </div>
 
       {/* Push-to-talk control */}
-      <div className="p-4 sm:p-6 bg-white border-t border-gray-100 flex flex-col items-center justify-center gap-3">
-        <button
+      <div className="p-6 sm:p-8 bg-white border-t border-gray-100 flex flex-col items-center justify-center gap-4 relative z-0">
+        <motion.button
           type="button"
           disabled={!isConnected}
           onPointerDown={startPtt}
@@ -397,35 +445,53 @@ function TranscriptPanelConnected({ sessionId }: { sessionId: string }) {
           onPointerCancel={endPtt}
           onContextMenu={(e) => e.preventDefault()}
           style={{ touchAction: "none" }}
-          aria-pressed={holding}
-          aria-label="Hold to talk"
-          className={`flex items-center justify-center w-20 h-20 rounded-full shadow-lg transition-all relative touch-none ${
+          animate={{ scale: holding ? 1.05 : 1 }}
+          transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          className={`flex items-center justify-center w-20 h-20 rounded-full transition-colors relative touch-none z-10 ${
             !isConnected
-              ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+              ? "bg-gray-100 text-gray-400 cursor-not-allowed"
               : holding
-                ? "bg-emerald-600 text-white shadow-emerald-600/40 scale-110"
-                : "bg-gray-900 text-white hover:bg-gray-800"
+                ? "bg-blue-600 text-white shadow-[0_0_30px_rgba(37,99,235,0.4)]"
+                : "bg-gray-900 text-white hover:bg-gray-800 shadow-xl"
           }`}
         >
-          {holding && (
-            <div className="absolute inset-0 rounded-full border-2 border-emerald-300 animate-ping opacity-50" />
-          )}
-          {holding ? <Mic className="w-7 h-7" /> : <MicOff className="w-7 h-7" />}
-        </button>
+          {/* Animated Ripples */}
+          <AnimatePresence>
+            {holding && (
+              <>
+                <motion.div
+                  initial={{ opacity: 0, scale: 1 }}
+                  animate={{ opacity: [0, 1, 0], scale: 1.6 }}
+                  exit={{ opacity: 0, scale: 1 }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
+                  className="absolute inset-0 rounded-full bg-blue-500/20 -z-10"
+                />
+                <motion.div
+                  initial={{ opacity: 0, scale: 1 }}
+                  animate={{ opacity: [0, 1, 0], scale: 1.3 }}
+                  exit={{ opacity: 0, scale: 1 }}
+                  transition={{ duration: 1.5, delay: 0.2, repeat: Infinity, ease: "easeInOut" }}
+                  className="absolute inset-0 rounded-full bg-blue-500/30 -z-10"
+                />
+              </>
+            )}
+          </AnimatePresence>
+          {holding ? <Mic className="w-8 h-8" /> : <MicOff className="w-7 h-7" />}
+        </motion.button>
         <span
-          className={`text-[10px] font-bold uppercase tracking-widest ${
+          className={`text-[11px] font-bold uppercase tracking-widest ${
             !isConnected
               ? "text-gray-300"
               : holding
-                ? "text-emerald-600 animate-pulse"
+                ? "text-blue-600"
                 : "text-gray-400"
           }`}
         >
           {!isConnected
             ? "Not connected"
             : holding
-              ? "Listening — release when done"
-              : "Hold to talk · Push-to-talk"}
+              ? "Listening — Release to send"
+              : "Hold to talk"}
         </span>
       </div>
     </div>

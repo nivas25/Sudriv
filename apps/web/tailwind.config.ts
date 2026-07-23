@@ -66,6 +66,7 @@ const config: Config = {
         sans: ["var(--font-sans)", "system-ui", "sans-serif"],
         heading: ["var(--font-heading)", "system-ui", "sans-serif"],
         mono: ["var(--font-mono)", "monospace"],
+        hindi: ["var(--font-hindi)", "system-ui", "sans-serif"],
       },
       keyframes: {
         "pulse-on-air": {

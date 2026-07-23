@@ -3,6 +3,7 @@
 import { useRunningOrder } from "@/hooks/use-running-order";
 import { TimelineSegment } from "./timeline-segment";
 import { TimelineHeader } from "./timeline-header";
+import { AnimatePresence } from "framer-motion";
 
 /**
  * TimelinePanel — running order list with manual Refresh + auto-poll.
@@ -69,14 +70,16 @@ export function TimelinePanel({ sessionId }: { sessionId: string }) {
             </button>
           </div>
         ) : (
-          segments.map((segment) => (
-            <TimelineSegment
-              // Include version + position so React remounts after agent apply
-              // (segment UUIDs can change when agent rewrites the RO).
-              key={`v${version}-${segment.position}-${segment.id}`}
-              segment={segment as any}
-            />
-          ))
+          <div className="flex flex-col">
+            <AnimatePresence mode="popLayout" initial={false}>
+              {segments.map((segment) => (
+                <TimelineSegment
+                  key={`v${version}-${segment.position}-${segment.id}`}
+                  segment={segment as any}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
         )}
       </div>
     </div>

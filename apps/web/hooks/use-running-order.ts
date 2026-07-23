@@ -95,7 +95,7 @@ export function useRunningOrder(sessionId: string) {
         const fingerprint = `${data.version}:${segs.length}:${segs
           .map(
             (s) =>
-              `${s.id}:${s.position}:${s.title}:${s.duration_seconds}:${s.start_offset_seconds ?? 0}:${s.status}`,
+              `${s.id}:${s.position}:${s.title}:${s.duration_seconds}:${s.start_offset_seconds ?? 0}:${s.status}:${s.teleprompter_text?.length ?? 0}`,
           )
           .join("|")}`;
 
@@ -170,7 +170,19 @@ export function useRunningOrder(sessionId: string) {
           filter: `session_id=eq.${sessionId}`,
         },
         () => {
-          console.info("[useRunningOrder] Realtime update received");
+          console.info("[useRunningOrder] Realtime running_orders update received");
+          void load("realtime");
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "segments",
+        },
+        () => {
+          console.info("[useRunningOrder] Realtime segments update received");
           void load("realtime");
         }
       )

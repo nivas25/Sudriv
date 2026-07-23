@@ -42,26 +42,91 @@ export function Header() {
       }
     };
 
-    // Load active template info
-    const loadTemplate = async () => {
-      const { data } = await supabase
-        .from("timelines_library")
-        .select("name, default_duration_seconds, default_segments")
-        .eq("is_active", true)
-        .limit(1)
-        .maybeSingle();
-      
-      if (data) {
-        setTemplateName(data.name);
-        setTotalDuration(data.default_duration_seconds);
-        const segs = data.default_segments;
-        setSegmentCount(Array.isArray(segs) ? segs.length : 0);
+    let activeChannel: ReturnType<typeof supabase.channel> | null = null;
+
+    const loadData = async () => {
+      const sessionId = isSessionActive ? pathname?.split("/").pop() : null;
+
+      if (isSessionActive && sessionId) {
+        const { data } = await supabase
+          .from("running_orders")
+          .select("name, segments")
+          .eq("id", sessionId)
+          .maybeSingle();
+
+        if (data) {
+          setTemplateName(data.name || "Live Session");
+          const segs = Array.isArray(data.segments) ? data.segments : [];
+          setSegmentCount(segs.length);
+          setTotalDuration(segs.reduce((acc: any, curr: any) => acc + (curr.duration_seconds || 0), 0));
+        }
+
+        activeChannel = supabase
+          .channel("header_ro_sync")
+          .on("postgres_changes", { event: "*", schema: "public", table: "running_orders", filter: `id=eq.${sessionId}` }, (payload) => {
+             if (payload.new) {
+               const newData = payload.new as any;
+               setTemplateName(newData.name || "Live Session");
+               const segs = Array.isArray(newData.segments) ? newData.segments : [];
+               setSegmentCount(segs.length);
+               setTotalDuration(segs.reduce((acc: any, curr: any) => acc + (curr.duration_seconds || 0), 0));
+             }
+          })
+          .subscribe();
+      } else {
+        const { data } = await supabase
+          .from("timelines_library")
+          .select("name, default_segments")
+          .eq("is_active", true)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        
+        if (data) {
+          setTemplateName(data.name);
+          const segs = Array.isArray(data.default_segments) ? data.default_segments : [];
+          setSegmentCount(segs.length);
+          setTotalDuration(segs.reduce((acc: any, curr: any) => acc + (curr.duration_seconds || 0), 0));
+        }
+
+        activeChannel = supabase
+          .channel("header_tl_sync")
+          .on("postgres_changes", { event: "*", schema: "public", table: "timelines_library" }, (payload) => {
+             if (payload.new) {
+               const newData = payload.new as any;
+               if (newData.is_active) {
+                 setTemplateName(newData.name);
+                 const segs = Array.isArray(newData.default_segments) ? newData.default_segments : [];
+                 setSegmentCount(segs.length);
+                 setTotalDuration(segs.reduce((acc: any, curr: any) => acc + (curr.duration_seconds || 0), 0));
+               }
+             }
+          })
+          .subscribe();
       }
     };
 
+    const handleCustomEvent = (e: any) => {
+      const { name, segments } = e.detail;
+      if (name) setTemplateName(name);
+      if (segments && Array.isArray(segments)) {
+        setSegmentCount(segments.length);
+        setTotalDuration(segments.reduce((acc: any, curr: any) => acc + (curr.duration_seconds || 0), 0));
+      }
+    };
+
+    window.addEventListener("timeline_updated", handleCustomEvent);
+
     loadUser();
-    loadTemplate();
-  }, []);
+    loadData();
+
+    return () => {
+      window.removeEventListener("timeline_updated", handleCustomEvent);
+      if (activeChannel) {
+        supabase.removeChannel(activeChannel);
+      }
+    };
+  }, [isSessionActive, pathname, supabase]);
 
   const handleStartSession = async () => {
     setStarting(true);

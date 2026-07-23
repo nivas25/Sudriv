@@ -748,7 +748,7 @@ class SudrivToolkit:
 
         if segment_id:
             try:
-                uuid.UUID(segment_id)
+                uuid.UUID(str(segment_id))
             except ValueError:
                 logger.warning("Invalid segment_id %s — clearing", segment_id)
                 segment_id = None
@@ -786,6 +786,7 @@ class SudrivToolkit:
 
         def _write() -> tuple[str, Optional[str], Optional[int]]:
             supabase = supabase_client()
+            safe_itype = itype if itype in {"transition", "breaking", "correction", "timing", "general"} else "general"
             result = (
                 supabase.table("anchor_instructions")
                 .insert(
@@ -793,7 +794,7 @@ class SudrivToolkit:
                         "session_id": session_id,
                         "segment_id": segment_id,
                         "instruction_text": text,
-                        "instruction_type": itype,
+                        "instruction_type": safe_itype,
                         "status": "pending",
                     }
                 )
