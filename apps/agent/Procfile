@@ -1,1 +1,2 @@
-worker: uv run python main.py start
+worker: PORT=8081 uv run python main.py start
+
