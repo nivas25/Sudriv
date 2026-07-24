@@ -8,33 +8,28 @@ export async function POST(request: Request) {
     const supabase = await createClient();
     const admin = createAdminClient();
     
-    // 1. Fetch user and template in parallel to halve initial wait time
-    const [
-      { data: authData, error: authError },
-      { data: template, error: templateError }
-    ] = await Promise.all([
-      supabase.auth.getUser(),
-      admin
+    const userId = request.headers.get("x-user-id");
+    const userEmail = request.headers.get("x-user-email");
+
+    if (!userId) {
+      console.error("[session/POST] Auth error: No x-user-id header found (middleware bypassed?)");
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // 1. Fetch template
+    const { data: template, error: templateError } = await admin
         .from("timelines_library")
         .select("*")
         .eq("is_active", true)
         .order("created_at", { ascending: false })
         .limit(1)
-        .maybeSingle()
-    ]);
-
-    if (authError || !authData.user) {
-      console.error("[session/POST] Auth error:", authError?.message);
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+        .maybeSingle();
 
     if (templateError || !template) {
       console.error("[session/POST] Template error:", templateError?.message);
       return NextResponse.json({ error: `No templates found` }, { status: 500 });
     }
 
-    const userId = authData.user.id;
-    const userEmail = authData.user.email;
     
     // 2. Fire-and-forget user sync to save ~500ms
     admin.from("users").upsert({

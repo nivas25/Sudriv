@@ -61,5 +61,23 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
+  if (user) {
+    request.headers.set("x-user-id", user.id);
+    request.headers.set("x-user-email", user.email || "");
+    
+    const newResponse = NextResponse.next({
+      request: {
+        headers: request.headers,
+      },
+    });
+    
+    // Copy over any cookies (like refreshed auth tokens) set by Supabase
+    supabaseResponse.cookies.getAll().forEach((cookie) => {
+      newResponse.cookies.set(cookie.name, cookie.value, cookie);
+    });
+    
+    return newResponse;
+  }
+
   return supabaseResponse;
 }
