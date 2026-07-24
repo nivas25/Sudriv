@@ -259,7 +259,7 @@ def prewarm(proc: JobProcess) -> None:
     # False triggers are mitigated by push-to-talk (mic off when not held).
     proc.userdata["vad"] = silero.VAD.load(
         min_speech_duration=0.05,
-        min_silence_duration=0.35,
+        min_silence_duration=0.70,
         prefix_padding_duration=0.2,
         activation_threshold=0.4,
     )

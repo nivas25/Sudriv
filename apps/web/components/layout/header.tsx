@@ -61,8 +61,9 @@ export function Header() {
           setTotalDuration(segs.reduce((acc: any, curr: any) => acc + (curr.duration_seconds || 0), 0));
         }
 
+        const channelName = `header_ro_sync_${Date.now()}_${Math.random()}`;
         activeChannel = supabase
-          .channel("header_ro_sync")
+          .channel(channelName)
           .on("postgres_changes", { event: "*", schema: "public", table: "running_orders", filter: `id=eq.${sessionId}` }, (payload) => {
              if (payload.new) {
                const newData = payload.new as any;
@@ -89,8 +90,9 @@ export function Header() {
           setTotalDuration(segs.reduce((acc: any, curr: any) => acc + (curr.duration_seconds || 0), 0));
         }
 
+        const channelName = `header_tl_sync_${Date.now()}_${Math.random()}`;
         activeChannel = supabase
-          .channel("header_tl_sync")
+          .channel(channelName)
           .on("postgres_changes", { event: "*", schema: "public", table: "timelines_library" }, (payload) => {
              if (payload.new) {
                const newData = payload.new as any;
