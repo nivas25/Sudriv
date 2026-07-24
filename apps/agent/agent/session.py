@@ -483,13 +483,17 @@ class SessionManager:
             if segments:
                 inserts = []
                 for seg in segments:
+                    safe_type = seg.get("segment_type", "package")
+                    if safe_type not in ("package", "anchor_vo", "interview", "debate", "commercial"):
+                        safe_type = "package"
+                    
                     row = {
                         "id": seg["id"],
                         "running_order_id": ro_id,
                         "position": seg["position"],
                         "title": seg["title"],
                         "slug": seg.get("slug", f"seg-{seg['position']}"),
-                        "segment_type": seg.get("segment_type", "package"),
+                        "segment_type": safe_type,
                         "duration_seconds": seg["duration_seconds"],
                         "start_offset_seconds": seg.get("start_offset_seconds", 0),
                         "teleprompter_text": seg.get("teleprompter_text")

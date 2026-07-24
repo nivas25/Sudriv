@@ -206,12 +206,13 @@ class SudrivToolkit:
             if not new_title or not new_duration:
                 raise ValueError("Insert requires new_segment_title and new_segment_duration_seconds")
             
+            safe_type = new_type if new_type in ("package", "anchor_vo", "interview", "debate", "commercial") else "package"
             new_segment = {
                 "id": str(uuid.uuid4()),
                 "position": target_position,
                 "title": new_title,
                 "slug": slugify(new_title),
-                "segment_type": new_type,
+                "segment_type": safe_type,
                 "duration_seconds": new_duration,
                 "start_offset_seconds": 0,  # Will be recalculated
                 "status": "pending",
