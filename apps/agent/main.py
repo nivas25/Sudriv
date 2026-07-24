@@ -172,7 +172,7 @@ async def entrypoint(ctx: JobContext) -> None:
             tts_conn_options=_api_conn,
         ),
         turn_handling=TurnHandlingOptions(
-            endpointing=EndpointingOptions(min_delay=0.7, max_delay=3.0),
+            endpointing=EndpointingOptions(min_delay=0.4, max_delay=2.5),
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",

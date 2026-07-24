@@ -405,7 +405,7 @@ class SessionManager:
         lines = []
         for item in ranked[:limit]:
             lines.append(
-                f"  - [ID:{str(item.get('id', ''))[:8]}] [{item.get('priority', 'medium').upper()}] {item['headline']} "
+                f"  - [{item.get('priority', 'medium').upper()}] {item['headline']} "
                 f"({item.get('category', 'general')}, "
                 f"~{item.get('estimated_duration_seconds', 180) // 60}min)"
             )
@@ -483,17 +483,13 @@ class SessionManager:
             if segments:
                 inserts = []
                 for seg in segments:
-                    safe_type = seg.get("segment_type", "package")
-                    if safe_type not in ("package", "anchor_vo", "interview", "debate", "commercial"):
-                        safe_type = "package"
-                    
                     row = {
                         "id": seg["id"],
                         "running_order_id": ro_id,
                         "position": seg["position"],
                         "title": seg["title"],
                         "slug": seg.get("slug", f"seg-{seg['position']}"),
-                        "segment_type": safe_type,
+                        "segment_type": seg.get("segment_type", "package"),
                         "duration_seconds": seg["duration_seconds"],
                         "start_offset_seconds": seg.get("start_offset_seconds", 0),
                         "teleprompter_text": seg.get("teleprompter_text")

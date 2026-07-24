@@ -206,13 +206,12 @@ class SudrivToolkit:
             if not new_title or not new_duration:
                 raise ValueError("Insert requires new_segment_title and new_segment_duration_seconds")
             
-            safe_type = new_type if new_type in ("package", "anchor_vo", "interview", "debate", "commercial") else "package"
             new_segment = {
                 "id": str(uuid.uuid4()),
                 "position": target_position,
                 "title": new_title,
                 "slug": slugify(new_title),
-                "segment_type": safe_type,
+                "segment_type": new_type,
                 "duration_seconds": new_duration,
                 "start_offset_seconds": 0,  # Will be recalculated
                 "status": "pending",
@@ -221,8 +220,8 @@ class SudrivToolkit:
                 "teleprompter_text": anchor_script or (
                     f"{new_title}\n\n"
                     f"[LIVE]\n"
-                    f"This is the {new_title} segment. "
-                    f"Anchor begins reading from here."
+                    f"यह {new_title} सेगमेंट है। "
+                    f"एंकर यहाँ से पढ़ना शुरू करें।"
                 ),
             }
             
@@ -449,14 +448,14 @@ class SudrivToolkit:
             news_item = matched[0]
             news_item_id = news_item["id"]
             
-            # Improvement 3: Generate dynamic anchor script (English)
+            # Improvement 3: Generate dynamic anchor script
             try:
                 import openai
                 client = openai.AsyncOpenAI()
                 resp = await client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "You are a professional news anchor script writer. Write a 2-3 sentence anchor script for the teleprompter based on the provided news item. Use clear, professional English. Only return the script, no other text."},
+                        {"role": "system", "content": "You are a professional Hindi news anchor script writer. Write a 2-3 sentence anchor script for the teleprompter based on the provided news item. Use natural Hindi. Only return the script, no other text."},
                         {"role": "user", "content": f"Headline: {news_item.get('headline')}\nContent: {news_item.get('content')}"}
                     ]
                 )
