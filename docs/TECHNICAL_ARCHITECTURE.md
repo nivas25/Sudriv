@@ -14,9 +14,9 @@ Sudriv is a realtime, multi-modal control room application. It pairs a Next.js f
 - **Realtime Infrastructure**: LiveKit Cloud (WebRTC routing), Supabase Realtime (Postgres CDC WebSockets).
 - **Database**: Supabase (Postgres), Redis (Upstash) for distributed locking.
 - **AI Models**:
-  - **STT (Speech-to-Text)**: Deepgram Nova-2 (streaming).
+  - **STT (Speech-to-Text)**: Sarvam AI (Saaras v3 for Hindi, streaming).
   - **LLM (Reasoning)**: OpenAI GPT-4o / GPT-4o-mini.
-  - **TTS (Text-to-Speech)**: ElevenLabs (streaming).
+  - **TTS (Text-to-Speech)**: Sarvam AI (Bulbul v3 `priya` voice for Hindi, streaming).
   - **VAD (Voice Activity Detection)**: Silero VAD (local edge inference).
 
 ### System Topology
@@ -33,17 +33,17 @@ The voice pipeline operates as a continuous, asynchronous stream handled by the 
 
 ### The Flow
 1. **Audio Ingress**: The producer speaks into their microphone. Audio frames are routed via WebRTC to the Python worker.
-2. **STT (Deepgram)**: Incoming audio chunks are streamed to Deepgram. Deepgram emits intermediate text (is_final=False) and final text (is_final=True).
-3. **ChatContext**: Finalized speech is appended to the agent's `ChatContext` as a User message.
+2. **STT (Sarvam AI)**: Incoming audio chunks are streamed to Sarvam Saaras v3. It emits intermediate text (is_final=False) and final text (is_final=True) optimized for Hindi.
+3. **ChatContext**: Finalized speech is appended to the agent's `ChatContext` as a User message. (Note: Background noises like "uh", "um" are actively filtered by regex).
 4. **LLM Inference**: The framework triggers the LLM (OpenAI) with the updated `ChatContext`. 
    - *Note*: Before inference, Sudriv dynamically updates the System Prompt (via `get_focus_context`) to inject the absolute latest state (timeline, available news).
-5. **TTS Generation**: As the LLM streams text tokens back, they are buffered into sentences and streamed directly to ElevenLabs.
-6. **Audio Egress**: ElevenLabs returns PCM audio bytes, which the agent pushes back over WebRTC to the user's speaker.
+5. **TTS Generation**: As the LLM streams text tokens back, they are buffered into sentences and streamed directly to Sarvam Bulbul v3.
+6. **Audio Egress**: Sarvam returns PCM audio bytes, which the agent pushes back over WebRTC to the user's speaker.
 
 ### Interruption & Barge-In
 Interruption is managed locally on the worker using **Silero VAD**.
 - **Detection**: VAD constantly monitors incoming user audio. If it detects human speech (`min_silence_duration` is tuned to `0.7s` to prevent false positives from breathing/pausing), it triggers an interruption event.
-- **Cancellation**: The framework instantly aborts the active LLM generation task and halts the ElevenLabs TTS stream.
+- **Cancellation**: The framework instantly aborts the active LLM generation task and halts the Sarvam TTS stream.
 - **Context Truncation**: Crucially, the framework calculates exactly how many words were spoken by the TTS *before* the interruption. It rewrites the Assistant's message in the `ChatContext` to end exactly where it was cut off (e.g., `["I am going to add the..."]`), ensuring the LLM knows exactly what the user heard before they barged in.
 
 ### Tool Calling
@@ -178,7 +178,7 @@ Sudriv achieves a "magic" feeling of perfect synchronization without API polling
 ### Current Limitations & Future Work
 1. **Context Window Saturation**: If the news wire pulls in 500 articles, injecting all of them into the system prompt will consume massive tokens and increase latency.
    * *Future Fix*: Implement a RAG (Retrieval-Augmented Generation) layer or a `search_news` tool, rather than dumping all news into the prompt.
-2. **TTS Latency (TTFB)**: While ElevenLabs streaming is fast, there is still a ~300-500ms Time-To-First-Byte delay.
-   * *Future Fix*: Transition to OpenAI's native Realtime API (WebRTC audio-in to audio-out) to drop latency to ~150ms, bypassing separate STT and TTS hops.
+2. **TTS Latency (TTFB)**: Sarvam AI is specifically tuned for Indian languages, which makes the voice output much more natural, but integrating custom API plugins via WebSockets introduces small latencies compared to native, highly-optimized providers.
+   * *Future Fix*: Transition to OpenAI's native Realtime API (WebRTC audio-in to audio-out) for even lower latency, though this might sacrifice the hyper-realistic Hindi prosody that Sarvam provides.
 3. **Complex State Machine**: Keeping Redis, Supabase, and local Agent memory in perfect sync is complex and slightly fragile if network partitions occur.
    * *Future Fix*: Rely more on LiveKit Room metadata / DataChannels for ephemeral state sync rather than bouncing everything through Postgres CDC.
