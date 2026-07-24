@@ -220,8 +220,8 @@ class SudrivToolkit:
                 "teleprompter_text": anchor_script or (
                     f"{new_title}\n\n"
                     f"[LIVE]\n"
-                    f"यह {new_title} सेगमेंट है। "
-                    f"एंकर यहाँ से पढ़ना शुरू करें।"
+                    f"This is the {new_title} segment. "
+                    f"Anchor begins reading from here."
                 ),
             }
             
@@ -448,14 +448,14 @@ class SudrivToolkit:
             news_item = matched[0]
             news_item_id = news_item["id"]
             
-            # Improvement 3: Generate dynamic anchor script
+            # Improvement 3: Generate dynamic anchor script (English)
             try:
                 import openai
                 client = openai.AsyncOpenAI()
                 resp = await client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "You are a professional Hindi news anchor script writer. Write a 2-3 sentence anchor script for the teleprompter based on the provided news item. Use natural Hindi. Only return the script, no other text."},
+                        {"role": "system", "content": "You are a professional news anchor script writer. Write a 2-3 sentence anchor script for the teleprompter based on the provided news item. Use clear, professional English. Only return the script, no other text."},
                         {"role": "user", "content": f"Headline: {news_item.get('headline')}\nContent: {news_item.get('content')}"}
                     ]
                 )
