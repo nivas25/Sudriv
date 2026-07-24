@@ -176,7 +176,7 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.4,
+                min_duration=0.15,
                 min_words=0,
                 resume_false_interruption=True,
                 false_interruption_timeout=1.0,

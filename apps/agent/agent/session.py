@@ -405,7 +405,7 @@ class SessionManager:
         lines = []
         for item in ranked[:limit]:
             lines.append(
-                f"  - [{item.get('priority', 'medium').upper()}] {item['headline']} "
+                f"  - [ID:{str(item.get('id', ''))[:8]}] [{item.get('priority', 'medium').upper()}] {item['headline']} "
                 f"({item.get('category', 'general')}, "
                 f"~{item.get('estimated_duration_seconds', 180) // 60}min)"
             )
