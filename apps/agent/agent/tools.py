@@ -437,17 +437,40 @@ class SudrivToolkit:
             key=lambda s: s["position"],
         )
         
-        impact = self._calculate_impact(
-            segments=segments,
-            action=action,
-            target_position=target_position,
-            new_title=new_segment_title,
-            new_duration=new_segment_duration_seconds,
-            new_type=new_segment_type,
-            news_item_id=news_item_id,
-            move_to=move_to_position,
-            show_duration=self.session.running_order.get("total_duration_seconds", 0),
-        )
+        try:
+            impact = self._calculate_impact(
+                segments=segments,
+                action=action,
+                target_position=target_position,
+                new_title=new_segment_title,
+                new_duration=new_segment_duration_seconds,
+                new_type=new_segment_type,
+                news_item_id=news_item_id,
+                move_to=move_to_position,
+                show_duration=self.session.running_order.get("total_duration_seconds", 0),
+            )
+        except ValueError as e:
+            return f"ERROR in proposal: {str(e)}"
+        
+        # FAIL-FAST VALIDATION 1: Structural Invariants
+        temp_ro = {
+            "version": self.session.running_order.get("version", 0) + 1,
+            "segments": impact["new_segments"],
+            "total_duration_seconds": sum(s["duration_seconds"] for s in impact["new_segments"]),
+        }
+        validation_errors = self._validate_running_order(temp_ro)
+        if validation_errors:
+            return f"ERROR: Invalid running order state: {'; '.join(validation_errors)}"
+            
+        # FAIL-FAST VALIDATION 2: Database Foreign Keys
+        if news_item_id:
+            try:
+                supabase = supabase_client()
+                resp = supabase.table("news_items").select("id").eq("id", news_item_id).execute()
+                if not resp.data:
+                    return f"ERROR: The news_item_id '{news_item_id}' does not exist in the database. Please provide a valid ID or omit it."
+            except Exception as e:
+                return f"ERROR: Invalid news_item_id: {e}"
         
         proposal = {
             "proposal_type": action,
