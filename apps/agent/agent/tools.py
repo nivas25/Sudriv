@@ -188,6 +188,7 @@ class SudrivToolkit:
         news_item_id: str = None,
         move_to: int = None,
         show_duration: int = 0,
+        anchor_script: str = None,
     ) -> dict:
         """
         Pure function that calculates impact without side effects.
@@ -216,7 +217,7 @@ class SudrivToolkit:
                 "status": "pending",
                 "news_item_id": news_item_id,
                 # Anchor Script panel reads this field — never leave blank
-                "teleprompter_text": (
+                "teleprompter_text": anchor_script or (
                     f"{new_title}\n\n"
                     f"[LIVE]\n"
                     f"यह {new_title} सेगमेंट है। "
@@ -437,6 +438,32 @@ class SudrivToolkit:
             key=lambda s: s["position"],
         )
         
+        # FAIL-FAST VALIDATION 2: Database Foreign Keys
+        anchor_script = None
+        if news_item_id:
+            # Match by prefix from session cache to avoid hallucination UUID errors
+            matched = [n for n in self.session.available_news_items if str(n["id"]).startswith(news_item_id)]
+            if not matched:
+                raise ValueError(f"The news_item_id '{news_item_id}' does not match any unused news items. Do NOT ask for confirmation. Provide the exact ID from the context.")
+            news_item = matched[0]
+            news_item_id = news_item["id"]
+            
+            # Improvement 3: Generate dynamic anchor script
+            try:
+                import openai
+                client = openai.AsyncOpenAI()
+                resp = await client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a professional Hindi news anchor script writer. Write a 2-3 sentence anchor script for the teleprompter based on the provided news item. Use natural Hindi. Only return the script, no other text."},
+                        {"role": "user", "content": f"Headline: {news_item.get('headline')}\nContent: {news_item.get('content')}"}
+                    ]
+                )
+                anchor_script = resp.choices[0].message.content.strip()
+            except Exception as e:
+                logger.error(f"Failed to generate anchor script: {e}")
+        
+        
         try:
             impact = self._calculate_impact(
                 segments=segments,
@@ -448,9 +475,10 @@ class SudrivToolkit:
                 news_item_id=news_item_id,
                 move_to=move_to_position,
                 show_duration=self.session.running_order.get("total_duration_seconds", 0),
+                anchor_script=anchor_script,
             )
         except ValueError as e:
-            return f"ERROR in proposal: {str(e)}"
+            return f"ERROR in proposal: {str(e)} SILENTLY CORRECT THIS WITHOUT ASKING THE USER FOR CONFIRMATION."
         
         # FAIL-FAST VALIDATION 1: Structural Invariants
         temp_ro = {
@@ -460,17 +488,7 @@ class SudrivToolkit:
         }
         validation_errors = self._validate_running_order(temp_ro)
         if validation_errors:
-            return f"ERROR: Invalid running order state: {'; '.join(validation_errors)}"
-            
-        # FAIL-FAST VALIDATION 2: Database Foreign Keys
-        if news_item_id:
-            try:
-                supabase = supabase_client()
-                resp = supabase.table("news_items").select("id").eq("id", news_item_id).execute()
-                if not resp.data:
-                    return f"ERROR: The news_item_id '{news_item_id}' does not exist in the database. Please provide a valid ID or omit it."
-            except Exception as e:
-                return f"ERROR: Invalid news_item_id: {e}"
+            return f"ERROR: Invalid running order state: {'; '.join(validation_errors)}. SILENTLY CORRECT THIS WITHOUT ASKING THE USER."
         
         proposal = {
             "proposal_type": action,

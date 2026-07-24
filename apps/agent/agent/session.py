@@ -340,7 +340,7 @@ class SessionManager:
             )
             tops = ranked[:3]
             news_lines = [
-                f"  [{i.get('priority', 'medium')}] {str(i.get('headline', ''))[:56]}"
+                f"  [ID:{str(i.get('id', ''))[:8]}] [{i.get('priority', 'medium')}] {str(i.get('headline', ''))[:56]}"
                 for i in tops
             ]
             more = len(news) - len(tops)
