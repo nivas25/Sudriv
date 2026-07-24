@@ -17,6 +17,13 @@ from typing import Any, Optional
 
 from redis.asyncio import Redis
 from supabase import Client, create_client
+from supabase.lib.client_options import ClientOptions
+from supabase import create_async_client
+try:
+    from supabase import AsyncClient
+except ImportError:
+    # Fallback if typing is different
+    AsyncClient = Any
 
 logger = logging.getLogger("sudriv-agent.session")
 
@@ -26,6 +33,7 @@ logger = logging.getLogger("sudriv-agent.session")
 _redis_instance: Optional[Redis] = None
 _redis_loop: Optional[asyncio.AbstractEventLoop] = None
 _supabase_instance: Optional[Client] = None
+_supabase_async_instance: Optional[AsyncClient] = None
 
 
 def redis_client() -> Redis:
@@ -87,6 +95,22 @@ def supabase_client() -> Client:
     return _supabase_instance
 
 
+async def supabase_async_client() -> AsyncClient:
+    global _supabase_async_instance
+    if _supabase_async_instance is None:
+        url = os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
+        key = (
+            os.environ.get("SUPABASE_SERVICE_KEY")
+            or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        )
+        if not url or not key:
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_SERVICE_KEY required for async client"
+            )
+        _supabase_async_instance = await create_async_client(url, key)
+    return _supabase_async_instance
+
+
 @dataclass
 class SessionManager:
     """Per-session state manager. One instance per LiveKit room."""
@@ -97,6 +121,7 @@ class SessionManager:
     available_news_items: list[dict[str, Any]]
     pending_proposal: Optional[dict[str, Any]] = None
     _conversation_context: dict[str, Any] = field(default_factory=dict)
+    _realtime_channel: Any = field(default=None, repr=False)
 
     # Clients — initialized lazily or via from_room()
     # redis_client: Any = None
@@ -139,50 +164,104 @@ class SessionManager:
 
         # 2. If not in Redis, load from Supabase
         if not running_order:
-            logger.info(f"Running order not in Redis for {session_id}, loading from Supabase")
-            # Get the running order ID for this session
-            ro_resp = supabase.table("running_orders").select("*").eq("session_id", session_id).order("version", desc=True).limit(1).execute()
-            
-            if ro_resp.data:
-                ro_data = ro_resp.data[0]
-                
-                # Fetch segments for this running order
-                seg_resp = supabase.table("segments").select("*").eq("running_order_id", ro_data["id"]).order("position").execute()
-                
-                running_order = {
-                    "session_id": session_id,
-                    "version": ro_data["version"],
-                    "total_duration_seconds": ro_data["total_duration_seconds"],
-                    "segments": seg_resp.data if seg_resp.data else []
-                }
-                
+            running_order = await cls._fetch_running_order_from_db(session_id, supabase)
+            if running_order.get("segments"):
                 # Cache it in Redis asynchronously (fire and forget)
-                import asyncio
                 asyncio.create_task(redis.set(f"running_order:{session_id}", json.dumps(running_order)))
-            else:
-                # No running order found
-                running_order = {
-                    "session_id": session_id,
-                    "version": 1,
-                    "total_duration_seconds": 0,
-                    "segments": [],
-                }
 
         # 3. Load available news items from Supabase
-        news_items = []
-        try:
-            news_resp = supabase.table("news_items").select("*").eq("is_used", False).execute()
-            if news_resp.data:
-                news_items = news_resp.data
-        except Exception as e:
-            logger.warning(f"Failed to load news items from Supabase: {e}")
+        news_items = await cls._fetch_news_items_from_db(supabase)
 
-        return cls(
+        session = cls(
             session_id=session_id,
             user_id=user_id,
             running_order=running_order,
             available_news_items=news_items,
         )
+        
+        # Start background sync
+        await session.start_realtime_sync()
+        return session
+
+    @staticmethod
+    async def _fetch_running_order_from_db(session_id: str, supabase: Client) -> dict:
+        """Fetch running order synchronously from DB via to_thread."""
+        def _fetch():
+            logger.info(f"Running order not in Redis for {session_id}, loading from Supabase")
+            ro_resp = supabase.table("running_orders").select("*").eq("session_id", session_id).order("version", desc=True).limit(1).execute()
+            if ro_resp.data:
+                ro_data = ro_resp.data[0]
+                seg_resp = supabase.table("segments").select("*").eq("running_order_id", ro_data["id"]).order("position").execute()
+                return {
+                    "session_id": session_id,
+                    "version": ro_data["version"],
+                    "total_duration_seconds": ro_data["total_duration_seconds"],
+                    "segments": seg_resp.data if seg_resp.data else []
+                }
+            return {
+                "session_id": session_id,
+                "version": 1,
+                "total_duration_seconds": 0,
+                "segments": [],
+            }
+        return await asyncio.to_thread(_fetch)
+
+    @staticmethod
+    async def _fetch_news_items_from_db(supabase: Client) -> list:
+        def _fetch():
+            try:
+                news_resp = supabase.table("news_items").select("*").eq("is_used", False).execute()
+                return news_resp.data if news_resp.data else []
+            except Exception as e:
+                logger.warning(f"Failed to load news items from Supabase: {e}")
+                return []
+        return await asyncio.to_thread(_fetch)
+
+    async def reload_from_db(self) -> None:
+        """Reload context entirely from the DB on realtime changes."""
+        try:
+            supabase = supabase_client()
+            ro = await self._fetch_running_order_from_db(self.session_id, supabase)
+            news = await self._fetch_news_items_from_db(supabase)
+            
+            # Apply to session
+            self.running_order = ro
+            self.available_news_items = news
+            logger.info("Realtime DB sync complete. Memory state updated.")
+            
+            # Write new RO to Redis so it stays fresh
+            redis = redis_client()
+            await redis.set(f"running_order:{self.session_id}", json.dumps(ro, default=str))
+        except Exception as e:
+            logger.error(f"Failed to reload DB state during realtime sync: {e}")
+
+    async def start_realtime_sync(self):
+        """Subscribe to Supabase changes so agent is always in sync with producer."""
+        try:
+            client = await supabase_async_client()
+            channel = client.realtime.channel(f"session_sync_{self.session_id}")
+            
+            def on_change(payload):
+                logger.info(f"Supabase Realtime event detected on table {payload.get('table', '?')}.")
+                # Reload DB state without blocking the realtime thread
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.reload_from_db())
+                
+            channel.on_postgres_changes(
+                event="*", schema="public", table="running_orders", callback=on_change
+            )
+            channel.on_postgres_changes(
+                event="*", schema="public", table="segments", callback=on_change
+            )
+            channel.on_postgres_changes(
+                event="*", schema="public", table="news_items", callback=on_change
+            )
+            
+            await channel.subscribe()
+            self._realtime_channel = channel
+            logger.info(f"Supabase Realtime sync active for session {self.session_id}")
+        except Exception as e:
+            logger.error(f"Failed to start realtime sync: {e}")
 
     def get_focus_context(self) -> str:
         """
