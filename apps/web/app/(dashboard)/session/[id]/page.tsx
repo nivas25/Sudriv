@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import { useState } from "react";
 import { TimelinePanel } from "@/components/timeline/timeline-panel";
 import { TranscriptPanel } from "@/components/transcript/transcript-panel";
+import { LiveProducerFeed } from "@/components/producer/live-producer-feed";
 import { SessionControls } from "@/components/session/session-controls";
 import { LiveKitSessionProvider } from "@/components/voice/livekit-session-provider";
 import { ListVideo, MessageSquare, MonitorPlay } from "lucide-react";
@@ -15,7 +16,7 @@ import { ListVideo, MessageSquare, MonitorPlay } from "lucide-react";
 export default function SessionPage() {
   const params = useParams();
   const sessionId = params.id as string;
-  const [activeTab, setActiveTab] = useState<"timeline" | "copilot">("copilot");
+  const [activeTab, setActiveTab] = useState<"timeline" | "copilot" | "monitor">("copilot");
 
   return (
     <LiveKitSessionProvider sessionId={sessionId}>
@@ -39,6 +40,13 @@ export default function SessionPage() {
             <MessageSquare className="w-4 h-4" />
             <span>Copilot</span>
           </button>
+          <button 
+            onClick={() => setActiveTab("monitor")}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 text-xs font-bold uppercase tracking-widest border-b-2 transition-colors ${activeTab === "monitor" ? "border-primary text-primary" : "border-transparent text-gray-500 hover:text-gray-900"}`}
+          >
+            <MonitorPlay className="w-4 h-4" />
+            <span className="hidden sm:inline">Monitor</span>
+          </button>
         </div>
 
         {/* Main Control Room Layout */}
@@ -50,8 +58,13 @@ export default function SessionPage() {
           </div>
 
           {/* Center: AI Copilot Transcript Panel */}
-          <div className={`col-span-9 min-h-0 ${activeTab === "copilot" ? "flex flex-col h-full" : "hidden lg:flex lg:flex-col lg:h-full"}`}>
+          <div className={`col-span-5 min-h-0 ${activeTab === "copilot" ? "flex flex-col h-full" : "hidden lg:flex lg:flex-col lg:h-full"}`}>
             <TranscriptPanel sessionId={sessionId} />
+          </div>
+
+          {/* Right: Live Producer Feed (replaces old prompter/metadata) */}
+          <div className={`col-span-4 min-h-0 ${activeTab === "monitor" ? "flex flex-col h-full" : "hidden lg:flex lg:flex-col lg:h-full"}`}>
+            <LiveProducerFeed sessionId={sessionId} />
           </div>
 
         </div>
